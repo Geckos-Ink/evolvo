@@ -1,6 +1,8 @@
 # evolvo
 `[Alpha]` Implementation of Genetic Fixed Structure Language python library
 
+[GFSL Specifications](https://github.com/Geckos-Ink/evolvo/blob/main/papers/GFSL-definition.md)
+
 Looking at the GFSL specification and comparing it to the current implementation, I can see several fundamental misalignments. The specification emphasizes a rigid 10-slot numeric instruction format with cascading validity, while the current implementation uses flexible object-based instructions. Let me create a comprehensive update that properly implements the GFSL architecture.I've created a comprehensive update to the evolvo library that fully aligns with the GFSL specification. Here are the major improvements:
 
 ## Key Architectural Changes
