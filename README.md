@@ -19,6 +19,7 @@ The project reimplements the **Genetic Fixed Structure Language (GFSL)** as desc
   - `GFSLSupervisedGuide` is a PyTorch model that predicts fitness and proposes smarter mutations.
 - **Real-time evaluation** (`RealTimeEvaluator`) with pluggable scoring aggregators and per-test callbacks.
 - **Rich utilities** for mutation, crossover, diversity tracking, and population management.
+- **Ad-hoc personalization** via `register_custom_operation`, letting you graft bespoke operations into the validator/executor without forking the core.
 
 ---
 
@@ -73,6 +74,8 @@ The demo:
 3. Trains the `GFSLSupervisedGuide` on-the-fly as new genomes are evaluated.
 4. Evolves 60 generations with real-time progress prints.
 5. Displays the effective GFSL instruction trace and spot-check predictions.
+
+> Want to see runtime personalization instead? Run `python example.py personalization` to register and execute a bespoke decimal operation.
 
 If you prefer to start from scratch, the minimal API looks like:
 
@@ -199,7 +202,40 @@ x = torch.randn(1, 3, 32, 32)
 print(model(x).shape)
 ```
 
-### 3. Supervised Guided Evolution (From `example.py`)
+### 3. Ad-hoc Operations (Personalization)
+
+Use `register_custom_operation` when you need a one-off opcode without editing the core library. The helper wires your function into the slot validator, executor, and human-readable traces.
+
+```python
+from evolvo import (
+    Category, DataType, GFSLExecutor,
+    GFSLGenome, GFSLInstruction, register_custom_operation,
+)
+
+opcode = register_custom_operation(
+    "affine_bias",
+    target_type=DataType.DECIMAL,
+    function=lambda value, bias, context=None: float(value) * 1.5 + float(bias or 0.0),
+    arity=2,
+    value_enumeration=[-1.0, 0.0, 0.5, 2.0],  # inline VALUE slots pull from this list
+    doc="Scales the input and adds a selectable bias term.",
+)
+
+genome = GFSLGenome("algorithm")
+genome.add_instruction(GFSLInstruction([
+    Category.VARIABLE, DataType.DECIMAL, 1, opcode,
+    Category.VARIABLE, DataType.DECIMAL, 0,
+    Category.VALUE, DataType.DECIMAL, 3,  # chooses bias=2.0
+]))
+genome.mark_output(DataType.DECIMAL, 1)
+
+executor = GFSLExecutor()
+print(executor.execute(genome, {"d$0": 2.0}))  # {'d$1': 5.0}
+```
+
+The optional `context` keyword argument receives `{"executor": ..., "instruction": ...}` so custom functions can peek at runtime state when needed.
+
+### 4. Supervised Guided Evolution (From `example.py`)
 
 ```python
 from evolvo import (

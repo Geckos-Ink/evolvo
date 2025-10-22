@@ -38,6 +38,7 @@ import random
 import hashlib
 import json
 import copy
+import inspect
 from typing import List, Dict, Any, Tuple, Optional, Union, Set, Callable
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -153,6 +154,16 @@ class ValueEnumerations:
     def get_enumeration(context: Tuple[Operation, Optional[ConfigProperty]]) -> List[float]:
         """Get enumeration based on operation context"""
         op, prop = context
+
+        # Custom operations may contribute their own enumerations
+        custom_def = None
+        try:
+            custom_def = custom_operations.get(int(op))
+        except NameError:
+            # Manager not yet initialised; fall back to defaults
+            custom_def = None
+        if custom_def and custom_def.value_enumeration is not None:
+            return list(custom_def.value_enumeration)
         
         # Configuration contexts
         if op == Operation.SET:
@@ -174,6 +185,263 @@ class ValueEnumerations:
             return ValueEnumerations.PROBABILITIES
             
         return ValueEnumerations.MATH_CONSTANTS
+
+# ============================================================================
+# CUSTOM OPERATIONS
+# ============================================================================
+
+
+@dataclass
+class CustomOperation:
+    """Metadata describing a user-registered operation."""
+    
+    code: int
+    name: str
+    target_type: DataType
+    arity: int
+    function: Callable[..., Any]
+    source_types: Tuple[Optional[DataType], Optional[DataType]]
+    allowed_source_categories: Tuple[Tuple[Category, ...], Tuple[Category, ...]]
+    value_enumeration: Optional[Tuple[float, ...]]
+    doc: str = ""
+    accepts_context: bool = False
+
+
+class CustomOperationManager:
+    """Registry for ad-hoc operations."""
+    
+    def __init__(self, base_code: int = 1000):
+        self.base_code = base_code
+        self._ops_by_code: Dict[int, CustomOperation] = {}
+        self._ops_by_target: Dict[DataType, List[CustomOperation]] = defaultdict(list)
+        self._name_to_code: Dict[str, int] = {}
+        self._next_code = base_code
+    
+    def register(
+        self,
+        name: str,
+        target_type: Union[DataType, int],
+        function: Callable[..., Any],
+        *,
+        arity: int = 2,
+        source_types: Optional[Tuple[Optional[Union[DataType, int]], Optional[Union[DataType, int]]]] = None,
+        allowed_source_categories: Optional[
+            Tuple[Tuple[Category, ...], Tuple[Category, ...]]
+        ] = None,
+        value_enumeration: Optional[Union[List[float], Tuple[float, ...]]] = None,
+        code: Optional[int] = None,
+        doc: str = "",
+    ) -> int:
+        """Register a new custom operation and return its opcode."""
+        if arity not in (1, 2):
+            raise ValueError("Custom operations currently support arity 1 or 2.")
+        
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("Operation name must be a non-empty string.")
+        name_key = clean_name.upper()
+        if name_key in self._name_to_code:
+            raise ValueError(f"Operation '{clean_name}' is already registered.")
+        
+        if code is None:
+            code = self._next_code
+            self._next_code += 1
+        else:
+            code = int(code)
+            if code < self.base_code:
+                raise ValueError(
+                    f"Custom operation codes must be >= {self.base_code}; received {code}."
+                )
+            if code >= self._next_code:
+                self._next_code = code + 1
+        if code in self._ops_by_code:
+            raise ValueError(f"Opcode {code} is already in use.")
+        
+        dtype_target = DataType(target_type)
+        
+        if source_types is None:
+            if arity == 1:
+                source_types = (dtype_target, None)
+            else:
+                source_types = (dtype_target, dtype_target)
+        if len(source_types) != 2:
+            raise ValueError("source_types must be a tuple of length 2.")
+        resolved_source_types: Tuple[Optional[DataType], Optional[DataType]] = (
+            None if source_types[0] is None else DataType(source_types[0]),
+            None if source_types[1] is None else DataType(source_types[1]),
+        )
+        
+        if allowed_source_categories is None:
+            if arity == 1:
+                allowed_source_categories = (
+                    (Category.VARIABLE, Category.CONSTANT, Category.VALUE),
+                    (Category.NONE,),
+                )
+            else:
+                allowed_source_categories = (
+                    (Category.VARIABLE, Category.CONSTANT, Category.VALUE),
+                    (Category.VARIABLE, Category.CONSTANT, Category.VALUE),
+                )
+        if len(allowed_source_categories) != 2:
+            raise ValueError("allowed_source_categories must contain two tuples.")
+        allowed_source_categories = (
+            tuple(allowed_source_categories[0]),
+            tuple(allowed_source_categories[1]),
+        )
+        
+        signature = inspect.signature(function)
+        positional_params = [
+            p for p in signature.parameters.values()
+            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        required_positionals = [
+            p for p in positional_params if p.default is inspect._empty
+        ]
+        if len(positional_params) < arity:
+            raise ValueError(
+                f"Function '{clean_name}' accepts fewer positional arguments than required arity {arity}."
+            )
+        if len(required_positionals) > arity:
+            raise ValueError(
+                f"Function '{clean_name}' requires more positional arguments than arity {arity}."
+            )
+        accepts_context = any(
+            p.name == "context" and p.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+            for p in signature.parameters.values()
+        )
+        
+        value_enum_tuple = None
+        if value_enumeration is not None:
+            value_enum_tuple = tuple(float(v) for v in value_enumeration)
+        
+        op = CustomOperation(
+            code=code,
+            name=clean_name,
+            target_type=dtype_target,
+            arity=arity,
+            function=function,
+            source_types=resolved_source_types,
+            allowed_source_categories=allowed_source_categories,
+            value_enumeration=value_enum_tuple,
+            doc=doc,
+            accepts_context=accepts_context,
+        )
+        
+        self._ops_by_code[code] = op
+        self._ops_by_target[dtype_target].append(op)
+        self._name_to_code[name_key] = code
+        
+        # Keep per-target lists ordered for stable behaviour
+        self._ops_by_target[dtype_target].sort(key=lambda item: item.code)
+        return code
+    
+    def get(self, code: Union[int, Operation]) -> Optional[CustomOperation]:
+        """Retrieve metadata for a custom operation code."""
+        try:
+            return self._ops_by_code[int(code)]
+        except (KeyError, ValueError, TypeError):
+            return None
+    
+    def get_code_by_name(self, name: str) -> Optional[int]:
+        """Return opcode for a registered operation name if available."""
+        return self._name_to_code.get(name.strip().upper())
+    
+    def get_by_name(self, name: str) -> Optional[CustomOperation]:
+        code = self.get_code_by_name(name)
+        return self._ops_by_code.get(code) if code is not None else None
+    
+    def codes_for_target(self, dtype: Union[DataType, int]) -> List[int]:
+        """Return sorted custom opcodes that produce the requested data type."""
+        dtype_enum = DataType(dtype)
+        return [op.code for op in self._ops_by_target.get(dtype_enum, [])]
+    
+    def allowed_categories(self, code: int, source_index: int) -> Tuple[Category, ...]:
+        op = self.get(code)
+        if not op:
+            return ()
+        idx = source_index - 1
+        if idx < 0 or idx >= len(op.allowed_source_categories):
+            return ()
+        return op.allowed_source_categories[idx]
+    
+    def source_type(self, code: int, source_index: int) -> Optional[DataType]:
+        op = self.get(code)
+        if not op:
+            return None
+        idx = source_index - 1
+        if idx < 0 or idx >= len(op.source_types):
+            return None
+        dtype = op.source_types[idx]
+        if dtype is None and source_index == 1:
+            return op.target_type
+        return dtype
+    
+    def value_options(self, code: int) -> Optional[List[float]]:
+        op = self.get(code)
+        if not op or op.value_enumeration is None:
+            return None
+        return list(op.value_enumeration)
+    
+    def arity(self, code: int) -> int:
+        op = self.get(code)
+        return op.arity if op else 0
+    
+    def accepts_context(self, code: int) -> bool:
+        op = self.get(code)
+        return bool(op and op.accepts_context)
+
+
+custom_operations = CustomOperationManager()
+
+
+def resolve_operation_name(op_code: int) -> str:
+    """Return a readable name for built-in or custom operations."""
+    custom_op = custom_operations.get(op_code)
+    if custom_op:
+        return custom_op.name.upper()
+    try:
+        return Operation(op_code).name
+    except ValueError:
+        return f"CUSTOM_{op_code}"
+
+
+def register_custom_operation(
+    name: str,
+    target_type: Union[DataType, int],
+    function: Callable[..., Any],
+    *,
+    arity: int = 2,
+    source_types: Optional[
+        Tuple[Optional[Union[DataType, int]], Optional[Union[DataType, int]]]
+    ] = None,
+    allowed_source_categories: Optional[
+        Tuple[Tuple[Category, ...], Tuple[Category, ...]]
+    ] = None,
+    value_enumeration: Optional[Union[List[float], Tuple[float, ...]]] = None,
+    code: Optional[int] = None,
+    doc: str = "",
+) -> int:
+    """
+    Public helper for registering ad-hoc operations.
+    
+    The callable should accept one or two positional arguments (matching ``arity``)
+    and may optionally include a ``context`` keyword-only parameter that will receive
+    a dictionary with the current executor and instruction.
+    """
+    return custom_operations.register(
+        name,
+        target_type,
+        function,
+        arity=arity,
+        source_types=source_types,
+        allowed_source_categories=allowed_source_categories,
+        value_enumeration=value_enumeration,
+        code=code,
+        doc=doc,
+    )
 
 # ============================================================================
 # GFSL INSTRUCTION
@@ -301,6 +569,14 @@ class SlotValidator:
             target_type = instruction.slots[1]
             
             valid_ops = []
+            custom_codes: List[int] = []
+            try:
+                dtype_enum = DataType(target_type)
+            except ValueError:
+                dtype_enum = DataType.NONE
+            
+            if target_cat != Category.NONE and dtype_enum != DataType.NONE:
+                custom_codes = custom_operations.codes_for_target(dtype_enum)
             
             if target_cat == Category.NONE:
                 # Control flow operations
@@ -326,11 +602,19 @@ class SlotValidator:
                            Operation.POOL, Operation.NORM, Operation.DROPOUT,
                            Operation.SOFTMAX, Operation.RESHAPE, Operation.CONCAT]
             
-            return [int(op) for op in valid_ops]
+            result_ops = [int(op) for op in valid_ops]
+            result_ops.extend(custom_codes)
+            return result_ops
         
         # Slot 4: Source1 Category
         elif slot_index == 4:
             op = instruction.slots[3]
+            custom_op = custom_operations.get(op)
+            if custom_op:
+                allowed = custom_operations.allowed_categories(op, 1)
+                if not allowed:
+                    return [Category.NONE]
+                return [int(cat) for cat in allowed]
             
             if op == Operation.END:
                 return [Category.NONE]
@@ -352,6 +636,17 @@ class SlotValidator:
         elif slot_index == 5:
             source1_cat = instruction.slots[4]
             op = instruction.slots[3]
+            custom_op = custom_operations.get(op)
+            
+            if custom_op:
+                if source1_cat == Category.NONE:
+                    return [DataType.NONE]
+                elif source1_cat == Category.CONFIG:
+                    return [0]
+                dtype = custom_operations.source_type(op, 1) or custom_op.target_type
+                if dtype is None:
+                    return [DataType.NONE]
+                return [int(dtype)]
             
             if source1_cat == Category.NONE:
                 return [DataType.NONE]
@@ -407,6 +702,14 @@ class SlotValidator:
         # Slots 7-9: Source2 (similar logic to Source1)
         elif slot_index == 7:
             op = instruction.slots[3]
+            custom_op = custom_operations.get(op)
+            if custom_op:
+                if custom_operations.arity(op) < 2:
+                    return [Category.NONE]
+                allowed = custom_operations.allowed_categories(op, 2)
+                if not allowed:
+                    return [Category.NONE]
+                return [int(cat) for cat in allowed]
             # Check if operation is binary
             if op in [Operation.ADD, Operation.SUB, Operation.MUL, Operation.DIV,
                      Operation.POW, Operation.MOD, Operation.AND, Operation.OR,
@@ -418,6 +721,17 @@ class SlotValidator:
         
         elif slot_index == 8:
             source2_cat = instruction.slots[7]
+            op = instruction.slots[3]
+            custom_op = custom_operations.get(op)
+            if custom_op:
+                if source2_cat == Category.NONE:
+                    return [DataType.NONE]
+                elif source2_cat == Category.CONFIG:
+                    return [0]
+                dtype = custom_operations.source_type(op, 2) or custom_op.target_type
+                if dtype is None:
+                    return [DataType.NONE]
+                return [int(dtype)]
             if source2_cat == Category.NONE:
                 return [DataType.NONE]
             # Similar logic to source1_type
@@ -425,6 +739,31 @@ class SlotValidator:
         
         elif slot_index == 9:
             source2_cat = instruction.slots[7]
+            op = instruction.slots[3]
+            custom_op = custom_operations.get(op)
+            if custom_op:
+                if source2_cat == Category.NONE:
+                    return [0]
+                elif source2_cat == Category.CONFIG:
+                    return [0]
+                elif source2_cat == Category.VARIABLE:
+                    dtype = custom_operations.source_type(op, 2) or custom_op.target_type
+                    dtype_idx = int(dtype) if dtype is not None else 0
+                    count = self.variable_counts[dtype_idx]
+                    return list(range(count)) if count > 0 else [0]
+                elif source2_cat == Category.CONSTANT:
+                    dtype = custom_operations.source_type(op, 2) or custom_op.target_type
+                    dtype_idx = int(dtype) if dtype is not None else 0
+                    count = self.constant_counts[dtype_idx]
+                    return list(range(count)) if count > 0 else [0]
+                elif source2_cat == Category.VALUE:
+                    options = custom_operations.value_options(op)
+                    if options is not None and len(options) > 0:
+                        return list(range(len(options)))
+                    context = (op, None)
+                    enum = ValueEnumerations.get_enumeration(context)
+                    return list(range(len(enum))) if enum else [0]
+                return [0]
             if source2_cat == Category.NONE:
                 return [0]
             # Similar logic to source1_value
@@ -609,7 +948,7 @@ class GFSLGenome:
                     readable.append(f"{prefix} RESULT {self._decode_source(instr, 1)}")
             else:
                 target = self._decode_target(instr)
-                op_name = Operation(instr.operation).name
+                op_name = resolve_operation_name(instr.operation)
                 source1 = self._decode_source(instr, 1)
                 source2 = self._decode_source(instr, 2)
                 
@@ -727,7 +1066,12 @@ class GFSLExecutor:
     
     def _execute_instruction(self, instr: GFSLInstruction):
         """Execute a single instruction"""
-        op = Operation(instr.operation)
+        op_code = instr.operation
+        custom_op = custom_operations.get(op_code)
+        try:
+            op = Operation(op_code)
+        except ValueError:
+            op = None
         
         # Get source values
         source1 = self._get_value(instr, 1)
@@ -736,67 +1080,85 @@ class GFSLExecutor:
         # Execute operation
         result = None
         
-        # Control flow
-        if op == Operation.IF:
-            # Would need stack-based scope management for full implementation
-            pass
-        elif op == Operation.WHILE:
-            pass
-        elif op == Operation.END:
-            pass
-        elif op == Operation.SET:
-            # Store configuration
-            if instr.source1_cat == Category.CONFIG:
-                self.config_state[instr.source1_value] = source2
-        elif op == Operation.RESULT:
-            # Mark as output (handled elsewhere)
-            pass
-        
-        # Boolean operations
-        elif op == Operation.GT:
-            result = float(source1) > float(source2)
-        elif op == Operation.LT:
-            result = float(source1) < float(source2)
-        elif op == Operation.EQ:
-            result = abs(float(source1) - float(source2)) < 1e-9
-        elif op == Operation.AND:
-            result = bool(source1) and bool(source2)
-        elif op == Operation.OR:
-            result = bool(source1) or bool(source2)
-        elif op == Operation.NOT:
-            result = not bool(source1)
-        
-        # Decimal operations
-        elif op == Operation.ADD:
-            result = float(source1) + float(source2)
-        elif op == Operation.SUB:
-            result = float(source1) - float(source2)
-        elif op == Operation.MUL:
-            result = float(source1) * float(source2)
-        elif op == Operation.DIV:
-            result = float(source1) / float(source2) if source2 != 0 else 0.0
-        elif op == Operation.POW:
+        if custom_op:
+            args = [source1]
+            if custom_op.arity >= 2:
+                args.append(source2)
+            context = {"executor": self, "instruction": instr}
             try:
-                result = float(source1) ** float(source2)
-            except:
-                result = 0.0
-        elif op == Operation.SQRT:
-            result = float(source1) ** 0.5 if source1 >= 0 else 0.0
-        elif op == Operation.ABS:
-            result = abs(float(source1))
-        elif op == Operation.SIN:
-            result = np.sin(float(source1))
-        elif op == Operation.COS:
-            result = np.cos(float(source1))
-        elif op == Operation.EXP:
-            try:
-                result = np.exp(float(source1))
-            except:
-                result = 0.0
-        elif op == Operation.LOG:
-            result = np.log(float(source1)) if source1 > 0 else -float('inf')
-        elif op == Operation.MOD:
-            result = float(source1) % float(source2) if source2 != 0 else 0.0
+                if custom_op.accepts_context:
+                    result = custom_op.function(*args, context=context)
+                else:
+                    result = custom_op.function(*args)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Error executing custom operation '{custom_op.name}': {exc}"
+                ) from exc
+        elif op is None:
+            # Unknown opcode - ignore gracefully
+            return
+        else:
+            # Control flow
+            if op == Operation.IF:
+                # Would need stack-based scope management for full implementation
+                pass
+            elif op == Operation.WHILE:
+                pass
+            elif op == Operation.END:
+                pass
+            elif op == Operation.SET:
+                # Store configuration
+                if instr.source1_cat == Category.CONFIG:
+                    self.config_state[instr.source1_value] = source2
+            elif op == Operation.RESULT:
+                # Mark as output (handled elsewhere)
+                pass
+            
+            # Boolean operations
+            elif op == Operation.GT:
+                result = float(source1) > float(source2)
+            elif op == Operation.LT:
+                result = float(source1) < float(source2)
+            elif op == Operation.EQ:
+                result = abs(float(source1) - float(source2)) < 1e-9
+            elif op == Operation.AND:
+                result = bool(source1) and bool(source2)
+            elif op == Operation.OR:
+                result = bool(source1) or bool(source2)
+            elif op == Operation.NOT:
+                result = not bool(source1)
+            
+            # Decimal operations
+            elif op == Operation.ADD:
+                result = float(source1) + float(source2)
+            elif op == Operation.SUB:
+                result = float(source1) - float(source2)
+            elif op == Operation.MUL:
+                result = float(source1) * float(source2)
+            elif op == Operation.DIV:
+                result = float(source1) / float(source2) if source2 != 0 else 0.0
+            elif op == Operation.POW:
+                try:
+                    result = float(source1) ** float(source2)
+                except:
+                    result = 0.0
+            elif op == Operation.SQRT:
+                result = float(source1) ** 0.5 if source1 >= 0 else 0.0
+            elif op == Operation.ABS:
+                result = abs(float(source1))
+            elif op == Operation.SIN:
+                result = np.sin(float(source1))
+            elif op == Operation.COS:
+                result = np.cos(float(source1))
+            elif op == Operation.EXP:
+                try:
+                    result = np.exp(float(source1))
+                except:
+                    result = 0.0
+            elif op == Operation.LOG:
+                result = np.log(float(source1)) if source1 > 0 else -float('inf')
+            elif op == Operation.MOD:
+                result = float(source1) % float(source2) if source2 != 0 else 0.0
         
         # Store result
         if result is not None and instr.target_cat != Category.NONE:
@@ -961,7 +1323,11 @@ class RecursiveModelBuilder:
     
     def _process_neural_instruction(self, instr: GFSLInstruction):
         """Process instruction for neural architecture building"""
-        op = Operation(instr.operation)
+        try:
+            op = Operation(instr.operation)
+        except ValueError:
+            # Custom operations are ignored by the neural builder
+            return
         
         # Configuration setting
         if op == Operation.SET:
@@ -1371,19 +1737,28 @@ class GFSLFeatureExtractor:
         source_total = 0
 
         for instr in instructions:
-            op = Operation(instr.operation)
-            operation_counts[op] += 1
+            custom_op = custom_operations.get(instr.operation)
+            try:
+                op = Operation(instr.operation)
+            except ValueError:
+                op = None
 
-            if op in (Operation.IF, Operation.WHILE, Operation.END):
-                control_flow += 1
-            if op in (Operation.IF, Operation.WHILE):
-                depth += 1
-                if depth > max_depth_seen:
-                    max_depth_seen = depth
-            elif op == Operation.END and depth > 0:
-                depth -= 1
-            if op == Operation.SET:
-                set_ops += 1
+            if op is not None:
+                operation_counts[op] += 1
+
+                if op in (Operation.IF, Operation.WHILE, Operation.END):
+                    control_flow += 1
+                if op in (Operation.IF, Operation.WHILE):
+                    depth += 1
+                    if depth > max_depth_seen:
+                        max_depth_seen = depth
+                elif op == Operation.END and depth > 0:
+                    depth -= 1
+                if op == Operation.SET:
+                    set_ops += 1
+            elif custom_op:
+                if custom_op.target_type == DataType.TENSOR:
+                    tensor_flag = True
 
             target_cat = Category(instr.target_cat)
             target_category_counts[target_cat] += 1
@@ -1391,7 +1766,9 @@ class GFSLFeatureExtractor:
                 target_total += 1
                 target_dtype = DataType(instr.target_type)
                 target_type_counts[target_dtype] += 1
-                if target_dtype == DataType.TENSOR:
+                if target_dtype == DataType.TENSOR or (
+                    custom_op and custom_op.target_type == DataType.TENSOR
+                ):
                     tensor_flag = True
 
             for source_cat_int, source_type_int in (
