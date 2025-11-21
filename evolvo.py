@@ -58,15 +58,17 @@ class Category(IntEnum):
     NONE = 0
     VARIABLE = 1  # $
     CONSTANT = 2  # #
-    VALUE = 3     # !
-    CONFIG = 4    # &
+    VALUE = 3  # !
+    CONFIG = 4  # &
+
 
 class DataType(IntEnum):
     """Data types as integer indices"""
     NONE = 0
-    BOOLEAN = 1   # b
-    DECIMAL = 2   # d
-    TENSOR = 3    # t
+    BOOLEAN = 1  # b
+    DECIMAL = 2  # d
+    TENSOR = 3  # t
+
 
 class Operation(IntEnum):
     """Operations as integer indices"""
@@ -76,7 +78,7 @@ class Operation(IntEnum):
     END = 2
     SET = 3
     RESULT = 4
-    
+
     # Boolean operations (target = boolean)
     GT = 10
     LT = 11
@@ -87,7 +89,7 @@ class Operation(IntEnum):
     AND = 16
     OR = 17
     NOT = 18
-    
+
     # Decimal operations (target = decimal)
     ADD = 30
     SUB = 31
@@ -101,7 +103,7 @@ class Operation(IntEnum):
     EXP = 39
     LOG = 40
     MOD = 41
-    
+
     # Tensor operations (target = tensor)
     CONV = 60
     LINEAR = 61
@@ -112,6 +114,7 @@ class Operation(IntEnum):
     SOFTMAX = 66
     RESHAPE = 67
     CONCAT = 68
+
 
 class ConfigProperty(IntEnum):
     """Configuration properties for neural operations"""
@@ -124,32 +127,33 @@ class ConfigProperty(IntEnum):
     MOMENTUM = 6
     EPSILON = 7
 
+
 # ============================================================================
 # CONTEXT-DEPENDENT ENUMERATIONS
 # ============================================================================
 
 class ValueEnumerations:
     """Context-specific value enumerations"""
-    
+
     # Common mathematical values
     MATH_CONSTANTS = [0.0, 1.0, -1.0, 2.0, 0.5, 3.14159, 2.71828, 10.0]
-    
+
     # Neural network channels (powers of 2)
     CHANNELS = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-    
+
     # Kernel sizes
     KERNELS = [1, 3, 5, 7, 9, 11]
-    
+
     # Strides and padding
     STRIDES = [1, 2, 3, 4]
     PADDINGS = [0, 1, 2, 3, 4, 5]
-    
+
     # Probabilities (for dropout, etc.)
     PROBABILITIES = [0.0, 0.1, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1.0]
-    
+
     # Loop counts
     LOOP_COUNTS = [1, 2, 3, 5, 10, 20, 50, 100]
-    
+
     @staticmethod
     def get_enumeration(context: Tuple[Operation, Optional[ConfigProperty]]) -> List[float]:
         """Get enumeration based on operation context"""
@@ -164,7 +168,7 @@ class ValueEnumerations:
             custom_def = None
         if custom_def and custom_def.value_enumeration is not None:
             return list(custom_def.value_enumeration)
-        
+
         # Configuration contexts
         if op == Operation.SET:
             if prop == ConfigProperty.CHANNELS:
@@ -175,7 +179,7 @@ class ValueEnumerations:
                 return ValueEnumerations.STRIDES
             elif prop == ConfigProperty.RATE:
                 return ValueEnumerations.PROBABILITIES
-                
+
         # Operation contexts
         if op in [Operation.ADD, Operation.SUB, Operation.MUL, Operation.DIV]:
             return ValueEnumerations.MATH_CONSTANTS
@@ -183,8 +187,9 @@ class ValueEnumerations:
             return ValueEnumerations.LOOP_COUNTS
         elif op == Operation.DROPOUT:
             return ValueEnumerations.PROBABILITIES
-            
+
         return ValueEnumerations.MATH_CONSTANTS
+
 
 # ============================================================================
 # CUSTOM OPERATIONS
@@ -194,7 +199,7 @@ class ValueEnumerations:
 @dataclass
 class CustomOperation:
     """Metadata describing a user-registered operation."""
-    
+
     code: int
     name: str
     target_type: DataType
@@ -209,40 +214,40 @@ class CustomOperation:
 
 class CustomOperationManager:
     """Registry for ad-hoc operations."""
-    
+
     def __init__(self, base_code: int = 1000):
         self.base_code = base_code
         self._ops_by_code: Dict[int, CustomOperation] = {}
         self._ops_by_target: Dict[DataType, List[CustomOperation]] = defaultdict(list)
         self._name_to_code: Dict[str, int] = {}
         self._next_code = base_code
-    
+
     def register(
-        self,
-        name: str,
-        target_type: Union[DataType, int],
-        function: Callable[..., Any],
-        *,
-        arity: int = 2,
-        source_types: Optional[Tuple[Optional[Union[DataType, int]], Optional[Union[DataType, int]]]] = None,
-        allowed_source_categories: Optional[
-            Tuple[Tuple[Category, ...], Tuple[Category, ...]]
-        ] = None,
-        value_enumeration: Optional[Union[List[float], Tuple[float, ...]]] = None,
-        code: Optional[int] = None,
-        doc: str = "",
+            self,
+            name: str,
+            target_type: Union[DataType, int],
+            function: Callable[..., Any],
+            *,
+            arity: int = 2,
+            source_types: Optional[Tuple[Optional[Union[DataType, int]], Optional[Union[DataType, int]]]] = None,
+            allowed_source_categories: Optional[
+                Tuple[Tuple[Category, ...], Tuple[Category, ...]]
+            ] = None,
+            value_enumeration: Optional[Union[List[float], Tuple[float, ...]]] = None,
+            code: Optional[int] = None,
+            doc: str = "",
     ) -> int:
         """Register a new custom operation and return its opcode."""
         if arity not in (1, 2):
             raise ValueError("Custom operations currently support arity 1 or 2.")
-        
+
         clean_name = name.strip()
         if not clean_name:
             raise ValueError("Operation name must be a non-empty string.")
         name_key = clean_name.upper()
         if name_key in self._name_to_code:
             raise ValueError(f"Operation '{clean_name}' is already registered.")
-        
+
         if code is None:
             code = self._next_code
             self._next_code += 1
@@ -256,9 +261,9 @@ class CustomOperationManager:
                 self._next_code = code + 1
         if code in self._ops_by_code:
             raise ValueError(f"Opcode {code} is already in use.")
-        
+
         dtype_target = DataType(target_type)
-        
+
         if source_types is None:
             if arity == 1:
                 source_types = (dtype_target, None)
@@ -270,7 +275,7 @@ class CustomOperationManager:
             None if source_types[0] is None else DataType(source_types[0]),
             None if source_types[1] is None else DataType(source_types[1]),
         )
-        
+
         if allowed_source_categories is None:
             if arity == 1:
                 allowed_source_categories = (
@@ -288,7 +293,7 @@ class CustomOperationManager:
             tuple(allowed_source_categories[0]),
             tuple(allowed_source_categories[1]),
         )
-        
+
         signature = inspect.signature(function)
         positional_params = [
             p for p in signature.parameters.values()
@@ -312,11 +317,11 @@ class CustomOperationManager:
             )
             for p in signature.parameters.values()
         )
-        
+
         value_enum_tuple = None
         if value_enumeration is not None:
             value_enum_tuple = tuple(float(v) for v in value_enumeration)
-        
+
         op = CustomOperation(
             code=code,
             name=clean_name,
@@ -329,35 +334,35 @@ class CustomOperationManager:
             doc=doc,
             accepts_context=accepts_context,
         )
-        
+
         self._ops_by_code[code] = op
         self._ops_by_target[dtype_target].append(op)
         self._name_to_code[name_key] = code
-        
+
         # Keep per-target lists ordered for stable behaviour
         self._ops_by_target[dtype_target].sort(key=lambda item: item.code)
         return code
-    
+
     def get(self, code: Union[int, Operation]) -> Optional[CustomOperation]:
         """Retrieve metadata for a custom operation code."""
         try:
             return self._ops_by_code[int(code)]
         except (KeyError, ValueError, TypeError):
             return None
-    
+
     def get_code_by_name(self, name: str) -> Optional[int]:
         """Return opcode for a registered operation name if available."""
         return self._name_to_code.get(name.strip().upper())
-    
+
     def get_by_name(self, name: str) -> Optional[CustomOperation]:
         code = self.get_code_by_name(name)
         return self._ops_by_code.get(code) if code is not None else None
-    
+
     def codes_for_target(self, dtype: Union[DataType, int]) -> List[int]:
         """Return sorted custom opcodes that produce the requested data type."""
         dtype_enum = DataType(dtype)
         return [op.code for op in self._ops_by_target.get(dtype_enum, [])]
-    
+
     def allowed_categories(self, code: int, source_index: int) -> Tuple[Category, ...]:
         op = self.get(code)
         if not op:
@@ -366,7 +371,7 @@ class CustomOperationManager:
         if idx < 0 or idx >= len(op.allowed_source_categories):
             return ()
         return op.allowed_source_categories[idx]
-    
+
     def source_type(self, code: int, source_index: int) -> Optional[DataType]:
         op = self.get(code)
         if not op:
@@ -378,17 +383,17 @@ class CustomOperationManager:
         if dtype is None and source_index == 1:
             return op.target_type
         return dtype
-    
+
     def value_options(self, code: int) -> Optional[List[float]]:
         op = self.get(code)
         if not op or op.value_enumeration is None:
             return None
         return list(op.value_enumeration)
-    
+
     def arity(self, code: int) -> int:
         op = self.get(code)
         return op.arity if op else 0
-    
+
     def accepts_context(self, code: int) -> bool:
         op = self.get(code)
         return bool(op and op.accepts_context)
@@ -409,24 +414,24 @@ def resolve_operation_name(op_code: int) -> str:
 
 
 def register_custom_operation(
-    name: str,
-    target_type: Union[DataType, int],
-    function: Callable[..., Any],
-    *,
-    arity: int = 2,
-    source_types: Optional[
-        Tuple[Optional[Union[DataType, int]], Optional[Union[DataType, int]]]
-    ] = None,
-    allowed_source_categories: Optional[
-        Tuple[Tuple[Category, ...], Tuple[Category, ...]]
-    ] = None,
-    value_enumeration: Optional[Union[List[float], Tuple[float, ...]]] = None,
-    code: Optional[int] = None,
-    doc: str = "",
+        name: str,
+        target_type: Union[DataType, int],
+        function: Callable[..., Any],
+        *,
+        arity: int = 2,
+        source_types: Optional[
+            Tuple[Optional[Union[DataType, int]], Optional[Union[DataType, int]]]
+        ] = None,
+        allowed_source_categories: Optional[
+            Tuple[Tuple[Category, ...], Tuple[Category, ...]]
+        ] = None,
+        value_enumeration: Optional[Union[List[float], Tuple[float, ...]]] = None,
+        code: Optional[int] = None,
+        doc: str = "",
 ) -> int:
     """
     Public helper for registering ad-hoc operations.
-    
+
     The callable should accept one or two positional arguments (matching ``arity``)
     and may optionally include a ``context`` keyword-only parameter that will receive
     a dictionary with the current executor and instruction.
@@ -443,6 +448,7 @@ def register_custom_operation(
         doc=doc,
     )
 
+
 # ============================================================================
 # GFSL INSTRUCTION
 # ============================================================================
@@ -454,7 +460,7 @@ class GFSLInstruction:
     Each slot is an integer index.
     """
     slots: List[int]
-    
+
     def __init__(self, slots: Optional[List[int]] = None):
         if slots is None:
             # Initialize with NONE instruction
@@ -462,44 +468,55 @@ class GFSLInstruction:
         else:
             assert len(slots) == 10, "Instruction must have exactly 10 slots"
             self.slots = slots
-    
+
     @property
-    def target_cat(self) -> int: return self.slots[0]
-    
+    def target_cat(self) -> int:
+        return self.slots[0]
+
     @property
-    def target_type(self) -> int: return self.slots[1]
-    
+    def target_type(self) -> int:
+        return self.slots[1]
+
     @property
-    def target_index(self) -> int: return self.slots[2]
-    
+    def target_index(self) -> int:
+        return self.slots[2]
+
     @property
-    def operation(self) -> int: return self.slots[3]
-    
+    def operation(self) -> int:
+        return self.slots[3]
+
     @property
-    def source1_cat(self) -> int: return self.slots[4]
-    
+    def source1_cat(self) -> int:
+        return self.slots[4]
+
     @property
-    def source1_type(self) -> int: return self.slots[5]
-    
+    def source1_type(self) -> int:
+        return self.slots[5]
+
     @property
-    def source1_value(self) -> int: return self.slots[6]
-    
+    def source1_value(self) -> int:
+        return self.slots[6]
+
     @property
-    def source2_cat(self) -> int: return self.slots[7]
-    
+    def source2_cat(self) -> int:
+        return self.slots[7]
+
     @property
-    def source2_type(self) -> int: return self.slots[8]
-    
+    def source2_type(self) -> int:
+        return self.slots[8]
+
     @property
-    def source2_value(self) -> int: return self.slots[9]
-    
+    def source2_value(self) -> int:
+        return self.slots[9]
+
     def get_signature(self) -> str:
         """Get unique signature for this instruction"""
         return '|'.join(str(s) for s in self.slots)
-    
+
     def copy(self) -> 'GFSLInstruction':
         """Create deep copy"""
         return GFSLInstruction(self.slots.copy())
+
 
 # ============================================================================
 # SLOT VALIDATOR
@@ -510,14 +527,14 @@ class SlotValidator:
     Enforces cascading validity - each slot's valid options
     depend entirely on all previous slots.
     """
-    
+
     def __init__(self):
         self.active_types = {DataType.DECIMAL}  # Start with decimal only
         self.variable_counts = defaultdict(int)  # Track allocated variables
         self.constant_counts = defaultdict(int)  # Track defined constants
         self.scope_depth = 0
         self.config_state = {}  # Current configuration state for SET operations
-    
+
     def activate_type(self, dtype: DataType):
         """Progressively activate new types"""
         self.active_types.add(dtype)
@@ -527,14 +544,14 @@ class SlotValidator:
         elif dtype == DataType.TENSOR:
             # Tensor enables neural operations
             self.active_types.add(DataType.TENSOR)
-    
+
     def get_valid_options(self, instruction: GFSLInstruction, slot_index: int) -> List[int]:
         """Get valid options for a specific slot given all previous slots"""
-        
+
         # Slot 0: Target Category
         if slot_index == 0:
             return [Category.NONE, Category.VARIABLE, Category.CONSTANT]
-        
+
         # Slot 1: Target Type
         elif slot_index == 1:
             target_cat = instruction.slots[0]
@@ -546,12 +563,12 @@ class SlotValidator:
                 # Only primitives can be constants
                 return [DataType.BOOLEAN, DataType.DECIMAL]
             return [DataType.NONE]
-        
+
         # Slot 2: Target Index
         elif slot_index == 2:
             target_cat = instruction.slots[0]
             target_type = instruction.slots[1]
-            
+
             if target_cat == Category.NONE:
                 return [0]
             elif target_cat == Category.VARIABLE:
@@ -562,50 +579,50 @@ class SlotValidator:
                 count = self.constant_counts[target_type]
                 return list(range(count + 1))
             return [0]
-        
+
         # Slot 3: Operation
         elif slot_index == 3:
             target_cat = instruction.slots[0]
             target_type = instruction.slots[1]
-            
+
             valid_ops = []
             custom_codes: List[int] = []
             try:
                 dtype_enum = DataType(target_type)
             except ValueError:
                 dtype_enum = DataType.NONE
-            
+
             if target_cat != Category.NONE and dtype_enum != DataType.NONE:
                 custom_codes = custom_operations.codes_for_target(dtype_enum)
-            
+
             if target_cat == Category.NONE:
                 # Control flow operations
-                valid_ops = [Operation.IF, Operation.WHILE, Operation.END, 
-                           Operation.SET, Operation.RESULT]
-                
+                valid_ops = [Operation.IF, Operation.WHILE, Operation.END,
+                             Operation.SET, Operation.RESULT]
+
             elif target_type == DataType.BOOLEAN:
                 # Boolean operations
                 valid_ops = [Operation.GT, Operation.LT, Operation.EQ,
-                           Operation.GTE, Operation.LTE, Operation.NEQ,
-                           Operation.AND, Operation.OR, Operation.NOT]
-                
+                             Operation.GTE, Operation.LTE, Operation.NEQ,
+                             Operation.AND, Operation.OR, Operation.NOT]
+
             elif target_type == DataType.DECIMAL:
                 # Decimal operations
                 valid_ops = [Operation.ADD, Operation.SUB, Operation.MUL,
-                           Operation.DIV, Operation.POW, Operation.SQRT,
-                           Operation.ABS, Operation.SIN, Operation.COS,
-                           Operation.EXP, Operation.LOG, Operation.MOD]
-                
+                             Operation.DIV, Operation.POW, Operation.SQRT,
+                             Operation.ABS, Operation.SIN, Operation.COS,
+                             Operation.EXP, Operation.LOG, Operation.MOD]
+
             elif target_type == DataType.TENSOR:
                 # Tensor operations
                 valid_ops = [Operation.CONV, Operation.LINEAR, Operation.RELU,
-                           Operation.POOL, Operation.NORM, Operation.DROPOUT,
-                           Operation.SOFTMAX, Operation.RESHAPE, Operation.CONCAT]
-            
+                             Operation.POOL, Operation.NORM, Operation.DROPOUT,
+                             Operation.SOFTMAX, Operation.RESHAPE, Operation.CONCAT]
+
             result_ops = [int(op) for op in valid_ops]
             result_ops.extend(custom_codes)
             return result_ops
-        
+
         # Slot 4: Source1 Category
         elif slot_index == 4:
             op = instruction.slots[3]
@@ -615,7 +632,7 @@ class SlotValidator:
                 if not allowed:
                     return [Category.NONE]
                 return [int(cat) for cat in allowed]
-            
+
             if op == Operation.END:
                 return [Category.NONE]
             elif op == Operation.SET:
@@ -624,20 +641,20 @@ class SlotValidator:
                 return [Category.VARIABLE]
             elif op in [Operation.IF, Operation.WHILE]:
                 return [Category.VARIABLE, Category.CONSTANT]  # Boolean source
-            elif op in [Operation.NOT, Operation.SQRT, Operation.ABS, 
-                       Operation.SIN, Operation.COS, Operation.EXP, Operation.LOG]:
+            elif op in [Operation.NOT, Operation.SQRT, Operation.ABS,
+                        Operation.SIN, Operation.COS, Operation.EXP, Operation.LOG]:
                 # Unary operations
                 return [Category.VARIABLE, Category.CONSTANT, Category.VALUE]
             else:
                 # Binary operations
                 return [Category.VARIABLE, Category.CONSTANT, Category.VALUE]
-        
+
         # Slot 5: Source1 Type
         elif slot_index == 5:
             source1_cat = instruction.slots[4]
             op = instruction.slots[3]
             custom_op = custom_operations.get(op)
-            
+
             if custom_op:
                 if source1_cat == Category.NONE:
                     return [DataType.NONE]
@@ -647,7 +664,7 @@ class SlotValidator:
                 if dtype is None:
                     return [DataType.NONE]
                 return [int(dtype)]
-            
+
             if source1_cat == Category.NONE:
                 return [DataType.NONE]
             elif source1_cat == Category.CONFIG:
@@ -655,8 +672,8 @@ class SlotValidator:
                 return [0]  # Placeholder
             elif source1_cat in [Category.VARIABLE, Category.CONSTANT]:
                 # Type depends on operation requirements
-                if op in [Operation.GT, Operation.LT, Operation.EQ, 
-                         Operation.GTE, Operation.LTE, Operation.NEQ]:
+                if op in [Operation.GT, Operation.LT, Operation.EQ,
+                          Operation.GTE, Operation.LTE, Operation.NEQ]:
                     return [DataType.DECIMAL]
                 elif op in [Operation.AND, Operation.OR, Operation.NOT]:
                     return [DataType.BOOLEAN]
@@ -666,19 +683,19 @@ class SlotValidator:
                     return [DataType.DECIMAL]
                 elif op >= Operation.CONV and op <= Operation.CONCAT:
                     return [DataType.TENSOR]
-                    
+
             elif source1_cat == Category.VALUE:
                 # Inline values - type implicit from operation
                 return [DataType.DECIMAL]  # Most common
-                
+
             return [DataType.NONE]
-        
+
         # Slot 6: Source1 Value/Index
         elif slot_index == 6:
             source1_cat = instruction.slots[4]
             source1_type = instruction.slots[5]
             op = instruction.slots[3]
-            
+
             if source1_cat == Category.NONE:
                 return [0]
             elif source1_cat == Category.CONFIG:
@@ -696,9 +713,9 @@ class SlotValidator:
                 context = (op, None)
                 enum = ValueEnumerations.get_enumeration(context)
                 return list(range(len(enum)))
-                
+
             return [0]
-        
+
         # Slots 7-9: Source2 (similar logic to Source1)
         elif slot_index == 7:
             op = instruction.slots[3]
@@ -712,13 +729,13 @@ class SlotValidator:
                 return [int(cat) for cat in allowed]
             # Check if operation is binary
             if op in [Operation.ADD, Operation.SUB, Operation.MUL, Operation.DIV,
-                     Operation.POW, Operation.MOD, Operation.AND, Operation.OR,
-                     Operation.GT, Operation.LT, Operation.EQ, Operation.GTE,
-                     Operation.LTE, Operation.NEQ]:
+                      Operation.POW, Operation.MOD, Operation.AND, Operation.OR,
+                      Operation.GT, Operation.LT, Operation.EQ, Operation.GTE,
+                      Operation.LTE, Operation.NEQ]:
                 return [Category.VARIABLE, Category.CONSTANT, Category.VALUE]
             else:
                 return [Category.NONE]
-        
+
         elif slot_index == 8:
             source2_cat = instruction.slots[7]
             op = instruction.slots[3]
@@ -736,7 +753,7 @@ class SlotValidator:
                 return [DataType.NONE]
             # Similar logic to source1_type
             return self.get_valid_options(instruction, 5)  # Reuse source1 logic
-        
+
         elif slot_index == 9:
             source2_cat = instruction.slots[7]
             op = instruction.slots[3]
@@ -768,16 +785,16 @@ class SlotValidator:
                 return [0]
             # Similar logic to source1_value
             return self.get_valid_options(instruction, 6)  # Reuse source1 logic
-        
+
         return [0]
-    
+
     def update_state(self, instruction: GFSLInstruction):
         """Update validator state after instruction is added"""
         target_cat = instruction.target_cat
         target_type = instruction.target_type
         target_index = instruction.target_index
         op = instruction.operation
-        
+
         # Track variable/constant allocation
         if target_cat == Category.VARIABLE:
             if target_index >= self.variable_counts[target_type]:
@@ -785,13 +802,13 @@ class SlotValidator:
         elif target_cat == Category.CONSTANT:
             if target_index >= self.constant_counts[target_type]:
                 self.constant_counts[target_type] = target_index + 1
-        
+
         # Track scope depth
         if op == Operation.IF or op == Operation.WHILE:
             self.scope_depth += 1
         elif op == Operation.END:
             self.scope_depth = max(0, self.scope_depth - 1)
-        
+
         # Handle SET operations
         if op == Operation.SET:
             prop = instruction.source1_value
@@ -800,6 +817,7 @@ class SlotValidator:
             enum = ValueEnumerations.get_enumeration(context)
             if value_idx < len(enum):
                 self.config_state[prop] = enum[value_idx]
+
 
 # ============================================================================
 # GFSL GENOME
@@ -810,7 +828,7 @@ class GFSLGenome:
     Genome using fixed-structure GFSL instructions.
     Supports both algorithmic and neural network representations.
     """
-    
+
     def __init__(self, genome_type: str = "algorithm"):
         self.genome_type = genome_type
         self.instructions: List[GFSLInstruction] = []
@@ -820,29 +838,29 @@ class GFSLGenome:
         self.generation: int = 0
         self._signature: Optional[str] = None
         self._effective_instructions: Optional[List[int]] = None
-    
+
     def add_instruction_interactive(self) -> GFSLInstruction:
         """
         Build instruction slot-by-slot with cascading validity.
         This is the key method for Q-learning integration.
         """
         instruction = GFSLInstruction()
-        
+
         for slot_idx in range(10):
             valid_options = self.validator.get_valid_options(instruction, slot_idx)
             if not valid_options:
                 valid_options = [0]
-            
+
             # For now, random selection (Q-learning would choose here)
             instruction.slots[slot_idx] = random.choice(valid_options)
-        
+
         self.instructions.append(instruction)
         self.validator.update_state(instruction)
         self._signature = None
         self._effective_instructions = None
-        
+
         return instruction
-    
+
     def add_instruction(self, instruction: GFSLInstruction) -> bool:
         """Add a complete instruction with validation"""
         # Validate each slot against current state
@@ -852,19 +870,19 @@ class GFSLGenome:
             if instruction.slots[slot_idx] not in valid_options:
                 return False
             test_instr.slots[slot_idx] = instruction.slots[slot_idx]
-        
+
         self.instructions.append(instruction.copy())
         self.validator.update_state(instruction)
         self._signature = None
         self._effective_instructions = None
-        
+
         return True
-    
+
     def mark_output(self, var_type: DataType, var_index: int):
         """Mark a variable as output"""
         self.outputs.append((Category.VARIABLE, var_type, var_index))
         self._effective_instructions = None
-    
+
     def extract_effective_algorithm(self) -> List[int]:
         """
         Extract effective algorithm by tracing dependencies backward from outputs.
@@ -872,42 +890,42 @@ class GFSLGenome:
         """
         if self._effective_instructions is not None:
             return self._effective_instructions
-        
+
         if not self.outputs:
             # No outputs defined, consider all instructions effective
             self._effective_instructions = list(range(len(self.instructions)))
             return self._effective_instructions
-        
+
         # Build dependency graph
         dependencies = defaultdict(set)  # instruction_idx -> set of instruction_idx it depends on
         producers = {}  # (category, type, index) -> instruction_idx that produces it
-        
+
         for idx, instr in enumerate(self.instructions):
             # Record what this instruction produces
             if instr.target_cat != Category.NONE:
                 target_key = (instr.target_cat, instr.target_type, instr.target_index)
                 producers[target_key] = idx
-            
+
             # Record dependencies
             if instr.source1_cat in [Category.VARIABLE, Category.CONSTANT]:
                 source_key = (instr.source1_cat, instr.source1_type, instr.source1_value)
                 if source_key in producers:
                     dependencies[idx].add(producers[source_key])
-            
+
             if instr.source2_cat in [Category.VARIABLE, Category.CONSTANT]:
                 source_key = (instr.source2_cat, instr.source2_type, instr.source2_value)
                 if source_key in producers:
                     dependencies[idx].add(producers[source_key])
-        
+
         # Backward trace from outputs
         effective = set()
         to_check = []
-        
+
         # Find instructions that produce outputs
         for output in self.outputs:
             if output in producers:
                 to_check.append(producers[output])
-        
+
         # Trace dependencies
         while to_check:
             idx = to_check.pop()
@@ -915,10 +933,10 @@ class GFSLGenome:
                 effective.add(idx)
                 for dep_idx in dependencies[idx]:
                     to_check.append(dep_idx)
-        
+
         self._effective_instructions = sorted(effective)
         return self._effective_instructions
-    
+
     def get_signature(self) -> str:
         """Generate unique signature for this genome"""
         if self._signature is None:
@@ -928,14 +946,14 @@ class GFSLGenome:
                 sig_parts.append(self.instructions[idx].get_signature())
             self._signature = hashlib.md5('|'.join(sig_parts).encode()).hexdigest()
         return self._signature
-    
+
     def to_human_readable(self) -> List[str]:
         """Convert to human-readable format"""
         readable = []
         for idx, instr in enumerate(self.instructions):
             is_effective = idx in self.extract_effective_algorithm()
             prefix = "✓" if is_effective else "✗"
-            
+
             # Decode instruction
             if instr.target_cat == Category.NONE:
                 if instr.operation == Operation.IF:
@@ -951,26 +969,26 @@ class GFSLGenome:
                 op_name = resolve_operation_name(instr.operation)
                 source1 = self._decode_source(instr, 1)
                 source2 = self._decode_source(instr, 2)
-                
+
                 if instr.source2_cat == Category.NONE:
                     readable.append(f"{prefix} {target} = {op_name}({source1})")
                 else:
                     readable.append(f"{prefix} {target} = {op_name}({source1}, {source2})")
-        
+
         return readable
-    
+
     def _decode_target(self, instr: GFSLInstruction) -> str:
         """Decode target to readable format"""
         cat = Category(instr.target_cat)
         dtype = DataType(instr.target_type)
         idx = instr.target_index
-        
+
         if cat == Category.VARIABLE:
             return f"{dtype.name[0].lower()}${idx}"
         elif cat == Category.CONSTANT:
             return f"{dtype.name[0].lower()}#{idx}"
         return "NONE"
-    
+
     def _decode_source(self, instr: GFSLInstruction, source_num: int) -> str:
         """Decode source to readable format"""
         if source_num == 1:
@@ -981,7 +999,7 @@ class GFSLGenome:
             cat = Category(instr.source2_cat)
             dtype = DataType(instr.source2_type)
             val = instr.source2_value
-        
+
         if cat == Category.NONE:
             return "NONE"
         elif cat == Category.VARIABLE:
@@ -997,8 +1015,9 @@ class GFSLGenome:
             return f"VAL[{val}]"
         elif cat == Category.CONFIG:
             return ConfigProperty(val).name
-        
+
         return f"?{cat}:{dtype}:{val}"
+
 
 # ============================================================================
 # EXECUTION ENGINE
@@ -1006,52 +1025,61 @@ class GFSLGenome:
 
 class GFSLExecutor:
     """Executes GFSL genomes"""
-    
+
     def __init__(self):
         self.reset()
-    
+
     def reset(self):
         """Reset execution state"""
         self.variables = defaultdict(lambda: defaultdict(lambda: 0.0))
         self.constants = defaultdict(lambda: defaultdict(lambda: 0.0))
         self.config_state = {}
         self.execution_trace = []
-    
+
+    def _safe_float(self, val) -> float:
+        """Safely convert value to float, handling complex numbers and errors."""
+        try:
+            if isinstance(val, complex):
+                # Return magnitude for complex numbers to keep simulation in real domain
+                return abs(val)
+            return float(val)
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
     def execute(self, genome: GFSLGenome, inputs: Optional[Dict[str, float]] = None) -> Dict[str, float]:
         """
         Execute genome and return outputs.
-        
         Args:
             genome: The GFSL genome to execute
             inputs: Optional input values as {"d$0": 5.0, "b$0": True, ...}
-        
         Returns:
             Dictionary of output values
         """
         self.reset()
-        
+
         # Set input values
         if inputs:
             for key, value in inputs.items():
                 # Parse key like "d$0" or "b#1"
                 dtype_char = key[0]
                 is_const = '#' in key
-                idx = int(key.split('$' if '$' in key else '#')[1])
-                
+                idx_str = key.split('$' if '$' in key else '#')[1]
+                idx = int(idx_str)
+
                 dtype = {'b': DataType.BOOLEAN, 'd': DataType.DECIMAL}.get(dtype_char, DataType.DECIMAL)
-                
+
                 if is_const:
                     self.constants[dtype][idx] = value
                 else:
                     self.variables[dtype][idx] = value
-        
+
         # Execute only effective instructions
         effective_indices = genome.extract_effective_algorithm()
-        
+
         for idx in effective_indices:
             if idx < len(genome.instructions):
                 self._execute_instruction(genome.instructions[idx])
-        
+
         # Collect outputs
         outputs = {}
         for cat, dtype, idx in genome.outputs:
@@ -1061,9 +1089,9 @@ class GFSLExecutor:
             elif cat == Category.CONSTANT:
                 key = f"{DataType(dtype).name[0].lower()}#{idx}"
                 outputs[key] = self.constants[dtype][idx]
-        
+
         return outputs
-    
+
     def _execute_instruction(self, instr: GFSLInstruction):
         """Execute a single instruction"""
         op_code = instr.operation
@@ -1072,101 +1100,113 @@ class GFSLExecutor:
             op = Operation(op_code)
         except ValueError:
             op = None
-        
+
         # Get source values
         source1 = self._get_value(instr, 1)
         source2 = self._get_value(instr, 2)
-        
+
         # Execute operation
         result = None
-        
+
         if custom_op:
-            args = [source1]
+            # Sanitize inputs for custom ops
+            s1 = self._safe_float(source1)
+            s2 = self._safe_float(source2)
+            args = [s1]
             if custom_op.arity >= 2:
-                args.append(source2)
+                args.append(s2)
             context = {"executor": self, "instruction": instr}
             try:
                 if custom_op.accepts_context:
                     result = custom_op.function(*args, context=context)
                 else:
                     result = custom_op.function(*args)
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Error executing custom operation '{custom_op.name}': {exc}"
-                ) from exc
+                # Ensure custom op result is safe
+                if custom_op.target_type == DataType.DECIMAL:
+                    result = self._safe_float(result)
+            except Exception:
+                result = 0.0
+
         elif op is None:
-            # Unknown opcode - ignore gracefully
             return
         else:
-            # Control flow
+            # --- Control Flow ---
             if op == Operation.IF:
-                # Would need stack-based scope management for full implementation
                 pass
             elif op == Operation.WHILE:
                 pass
             elif op == Operation.END:
                 pass
             elif op == Operation.SET:
-                # Store configuration
                 if instr.source1_cat == Category.CONFIG:
                     self.config_state[instr.source1_value] = source2
             elif op == Operation.RESULT:
-                # Mark as output (handled elsewhere)
                 pass
-            
-            # Boolean operations
+
+            # --- Boolean Operations ---
             elif op == Operation.GT:
-                result = float(source1) > float(source2)
+                result = self._safe_float(source1) > self._safe_float(source2)
             elif op == Operation.LT:
-                result = float(source1) < float(source2)
+                result = self._safe_float(source1) < self._safe_float(source2)
             elif op == Operation.EQ:
-                result = abs(float(source1) - float(source2)) < 1e-9
+                result = abs(self._safe_float(source1) - self._safe_float(source2)) < 1e-9
             elif op == Operation.AND:
                 result = bool(source1) and bool(source2)
             elif op == Operation.OR:
                 result = bool(source1) or bool(source2)
             elif op == Operation.NOT:
                 result = not bool(source1)
-            
-            # Decimal operations
+
+            # --- Decimal Operations ---
+            # Use _safe_float to prevent complex numbers crashes
             elif op == Operation.ADD:
-                result = float(source1) + float(source2)
+                result = self._safe_float(source1) + self._safe_float(source2)
             elif op == Operation.SUB:
-                result = float(source1) - float(source2)
+                result = self._safe_float(source1) - self._safe_float(source2)
             elif op == Operation.MUL:
-                result = float(source1) * float(source2)
+                result = self._safe_float(source1) * self._safe_float(source2)
             elif op == Operation.DIV:
-                result = float(source1) / float(source2) if source2 != 0 else 0.0
+                s2 = self._safe_float(source2)
+                result = self._safe_float(source1) / s2 if s2 != 0 else 0.0
             elif op == Operation.POW:
                 try:
-                    result = float(source1) ** float(source2)
+                    b = self._safe_float(source1)
+                    e = self._safe_float(source2)
+                    # Prevent complex results from negative base + fractional exp
+                    if b < 0 and e != int(e):
+                        result = 0.0
+                    else:
+                        result = b ** e
                 except:
                     result = 0.0
             elif op == Operation.SQRT:
-                result = float(source1) ** 0.5 if source1 >= 0 else 0.0
+                val = self._safe_float(source1)
+                result = val ** 0.5 if val >= 0 else 0.0
             elif op == Operation.ABS:
-                result = abs(float(source1))
+                result = abs(self._safe_float(source1))
             elif op == Operation.SIN:
-                result = np.sin(float(source1))
+                result = np.sin(self._safe_float(source1))
             elif op == Operation.COS:
-                result = np.cos(float(source1))
+                result = np.cos(self._safe_float(source1))
             elif op == Operation.EXP:
                 try:
-                    result = np.exp(float(source1))
+                    result = np.exp(self._safe_float(source1))
                 except:
                     result = 0.0
             elif op == Operation.LOG:
-                result = np.log(float(source1)) if source1 > 0 else -float('inf')
+                val = self._safe_float(source1)
+                result = np.log(val) if val > 1e-9 else -100.0
             elif op == Operation.MOD:
-                result = float(source1) % float(source2) if source2 != 0 else 0.0
-        
+                s2 = self._safe_float(source2)
+                result = self._safe_float(source1) % s2 if s2 != 0 else 0.0
+
         # Store result
         if result is not None and instr.target_cat != Category.NONE:
             if instr.target_cat == Category.VARIABLE:
                 self.variables[instr.target_type][instr.target_index] = result
             elif instr.target_cat == Category.CONSTANT:
                 self.constants[instr.target_type][instr.target_index] = result
-    
+
     def _get_value(self, instr: GFSLInstruction, source_num: int) -> Any:
         """Get value for a source"""
         if source_num == 1:
@@ -1177,7 +1217,7 @@ class GFSLExecutor:
             cat = Category(instr.source2_cat)
             dtype = DataType(instr.source2_type)
             val = instr.source2_value
-        
+
         if cat == Category.NONE:
             return None
         elif cat == Category.VARIABLE:
@@ -1185,16 +1225,16 @@ class GFSLExecutor:
         elif cat == Category.CONSTANT:
             return self.constants[dtype][val]
         elif cat == Category.VALUE:
-            # Get from enumeration
             context = (instr.operation, None)
             enum = ValueEnumerations.get_enumeration(context)
             if val < len(enum):
                 return enum[val]
             return 0.0
         elif cat == Category.CONFIG:
-            return val  # Config property index
-        
+            return val
+
         return 0.0
+
 
 # ============================================================================
 # REAL-TIME EVALUATOR
@@ -1205,8 +1245,8 @@ class RealTimeEvaluator:
     Evaluates genomes multiple times with different inputs,
     supporting real-time scoring and aggregation.
     """
-    
-    def __init__(self, test_cases: List[Dict[str, float]], 
+
+    def __init__(self, test_cases: List[Dict[str, float]],
                  expected_outputs: Optional[List[Dict[str, float]]] = None,
                  score_aggregator: Optional[Callable] = None):
         """
@@ -1219,64 +1259,64 @@ class RealTimeEvaluator:
         self.expected_outputs = expected_outputs or [{}] * len(test_cases)
         self.score_aggregator = score_aggregator or self._default_aggregator
         self.executor = GFSLExecutor()
-    
+
     def _default_aggregator(self, scores: List[float]) -> float:
         """Default score aggregation: mean with penalty for failures"""
         if not scores:
             return -float('inf')
-        
+
         valid_scores = [s for s in scores if s != -float('inf')]
         if not valid_scores:
             return -float('inf')
-        
+
         # Penalize for failed test cases
         success_rate = len(valid_scores) / len(scores)
         mean_score = sum(valid_scores) / len(valid_scores)
-        
+
         return mean_score * success_rate
-    
-    def evaluate(self, genome: GFSLGenome, 
-                callback: Optional[Callable[[int, Dict, float], None]] = None) -> float:
+
+    def evaluate(self, genome: GFSLGenome,
+                 callback: Optional[Callable[[int, Dict, float], None]] = None) -> float:
         """
         Evaluate genome on all test cases.
-        
+
         Args:
             genome: The genome to evaluate
             callback: Optional callback(test_idx, output, score) for real-time feedback
-        
+
         Returns:
             Aggregated fitness score
         """
         scores = []
-        
+
         for idx, (inputs, expected) in enumerate(zip(self.test_cases, self.expected_outputs)):
             try:
                 # Execute genome
                 outputs = self.executor.execute(genome, inputs)
-                
+
                 # Calculate score for this test case
                 score = self._calculate_score(outputs, expected)
                 scores.append(score)
-                
+
                 # Real-time callback
                 if callback:
                     callback(idx, outputs, score)
-                
+
             except Exception as e:
                 scores.append(-float('inf'))
                 if callback:
                     callback(idx, {}, -float('inf'))
-        
+
         # Aggregate scores
         return self.score_aggregator(scores)
-    
-    def _calculate_score(self, outputs: Dict[str, float], 
-                        expected: Dict[str, float]) -> float:
+
+    def _calculate_score(self, outputs: Dict[str, float],
+                         expected: Dict[str, float]) -> float:
         """Calculate score for a single test case"""
         if not expected:
             # No expected output, just check if execution succeeded
             return 1.0 if outputs else 0.0
-        
+
         # Calculate error
         total_error = 0.0
         for key, expected_val in expected.items():
@@ -1285,9 +1325,10 @@ class RealTimeEvaluator:
                 total_error += error
             else:
                 total_error += abs(expected_val)  # Missing output penalty
-        
+
         # Convert error to score (lower error = higher score)
         return 1.0 / (1.0 + total_error)
+
 
 # ============================================================================
 # RECURSIVE MODEL BUILDER
@@ -1298,29 +1339,29 @@ class RecursiveModelBuilder:
     Builds neural network models using GFSL instructions,
     supporting recursive architecture selection.
     """
-    
+
     def __init__(self):
         self.layers = []
         self.config_state = {}
         self.current_shape = None
-    
+
     def build_from_genome(self, genome: GFSLGenome, input_shape: Tuple[int, ...]) -> nn.Module:
         """Build PyTorch model from GFSL genome"""
         self.layers = []
         self.config_state = {}
         self.current_shape = input_shape
-        
+
         # Process instructions
         for instr in genome.instructions:
             self._process_neural_instruction(instr)
-        
+
         # Create sequential model
         if not self.layers:
             # Empty model - just identity
             return nn.Identity()
-        
+
         return nn.Sequential(*self.layers)
-    
+
     def _process_neural_instruction(self, instr: GFSLInstruction):
         """Process instruction for neural architecture building"""
         try:
@@ -1328,32 +1369,32 @@ class RecursiveModelBuilder:
         except ValueError:
             # Custom operations are ignored by the neural builder
             return
-        
+
         # Configuration setting
         if op == Operation.SET:
             if instr.source1_cat == Category.CONFIG:
                 prop = ConfigProperty(instr.source1_value)
                 value_idx = instr.source2_value
-                
+
                 # Get actual value from enumeration
                 context = (op, prop)
                 enum = ValueEnumerations.get_enumeration(context)
                 if value_idx < len(enum):
                     self.config_state[prop] = enum[value_idx]
-        
+
         # Layer operations
         elif op == Operation.CONV:
             channels = int(self.config_state.get(ConfigProperty.CHANNELS, 32))
             kernel = int(self.config_state.get(ConfigProperty.KERNEL, 3))
             stride = int(self.config_state.get(ConfigProperty.STRIDE, 1))
             padding = int(self.config_state.get(ConfigProperty.PADDING, 1))
-            
+
             # Infer input channels from current shape
             in_channels = self.current_shape[0] if self.current_shape else 3
-            
+
             layer = nn.Conv2d(in_channels, channels, kernel, stride, padding)
             self.layers.append(layer)
-            
+
             # Update shape
             if self.current_shape and len(self.current_shape) >= 3:
                 h, w = self.current_shape[1:3]
@@ -1362,50 +1403,50 @@ class RecursiveModelBuilder:
                 self.current_shape = (channels, h_out, w_out)
             else:
                 self.current_shape = (channels, None, None)
-            
+
             # Clear config for next layer
             self.config_state = {}
-        
+
         elif op == Operation.LINEAR:
             units = int(self.config_state.get(ConfigProperty.UNITS, 128))
-            
+
             # Add flatten if needed
             if self.current_shape and len(self.current_shape) > 1:
                 self.layers.append(nn.Flatten())
                 in_features = np.prod(self.current_shape)
             else:
                 in_features = self.current_shape[0] if self.current_shape else 128
-            
+
             layer = nn.Linear(in_features, units)
             self.layers.append(layer)
-            
+
             self.current_shape = (units,)
             self.config_state = {}
-        
+
         elif op == Operation.RELU:
             self.layers.append(nn.ReLU())
-        
+
         elif op == Operation.DROPOUT:
             rate = self.config_state.get(ConfigProperty.RATE, 0.5)
             self.layers.append(nn.Dropout(rate))
             self.config_state = {}
-        
+
         elif op == Operation.POOL:
             kernel = int(self.config_state.get(ConfigProperty.KERNEL, 2))
             stride = int(self.config_state.get(ConfigProperty.STRIDE, 2))
-            
+
             layer = nn.MaxPool2d(kernel, stride)
             self.layers.append(layer)
-            
+
             # Update shape
             if self.current_shape and len(self.current_shape) >= 3:
                 h, w = self.current_shape[1:3]
                 h_out = (h - kernel) // stride + 1
                 w_out = (w - kernel) // stride + 1
                 self.current_shape = (self.current_shape[0], h_out, w_out)
-            
+
             self.config_state = {}
-        
+
         elif op == Operation.NORM:
             if self.current_shape:
                 if len(self.current_shape) >= 3:
@@ -1414,9 +1455,10 @@ class RecursiveModelBuilder:
                 else:
                     # BatchNorm1d for linear layers
                     self.layers.append(nn.BatchNorm1d(self.current_shape[0]))
-        
+
         elif op == Operation.SOFTMAX:
             self.layers.append(nn.Softmax(dim=-1))
+
 
 # ============================================================================
 # EVOLUTIONARY SYSTEM
@@ -1424,7 +1466,7 @@ class RecursiveModelBuilder:
 
 class GFSLEvolver:
     """Evolution engine for GFSL genomes"""
-    
+
     def __init__(self, population_size: int = 50, supervised_guide: Optional['GFSLSupervisedGuide'] = None):
         self.population_size = population_size
         self.population: List[GFSLGenome] = []
@@ -1438,99 +1480,99 @@ class GFSLEvolver:
     def set_supervised_guide(self, guide: 'GFSLSupervisedGuide'):
         """Attach or replace the supervised guidance model."""
         self.supervised_guide = guide
-    
-    def initialize_population(self, genome_type: str = "algorithm", 
-                            initial_instructions: int = 10):
+
+    def initialize_population(self, genome_type: str = "algorithm",
+                              initial_instructions: int = 10):
         """Create initial random population"""
         self.population = []
         self.diversity_cache = set()
         attempts = 0
         max_attempts = self.population_size * 10
-        
+
         while len(self.population) < self.population_size and attempts < max_attempts:
             genome = GFSLGenome(genome_type)
-            
+
             # Add random instructions
             for _ in range(random.randint(1, initial_instructions)):
                 genome.add_instruction_interactive()
-            
+
             # Add to population if unique
             sig = genome.get_signature()
             if sig not in self.diversity_cache:
                 self.diversity_cache.add(sig)
                 self.population.append(genome)
-            
+
             attempts += 1
-    
+
     def mutate(self, genome: GFSLGenome) -> GFSLGenome:
         """Mutate genome using slot-level mutations"""
         mutated = copy.deepcopy(genome)
         mutation_type = random.choice(['slot', 'add', 'remove'])
-        
+
         if mutation_type == 'slot' and mutated.instructions:
             # Mutate a random slot in a random instruction
             instr_idx = random.randint(0, len(mutated.instructions) - 1)
             slot_idx = random.randint(0, 9)
-            
+
             # Get valid options for this slot
             test_instr = mutated.instructions[instr_idx].copy()
             valid_options = mutated.validator.get_valid_options(test_instr, slot_idx)
-            
+
             if valid_options:
                 # Choose different value
                 current_val = test_instr.slots[slot_idx]
                 other_options = [v for v in valid_options if v != current_val]
                 if other_options:
                     mutated.instructions[instr_idx].slots[slot_idx] = random.choice(other_options)
-                    
+
                     # Cascade updates to dependent slots
                     for next_slot in range(slot_idx + 1, 10):
                         next_valid = mutated.validator.get_valid_options(
                             mutated.instructions[instr_idx], next_slot)
                         if next_valid:
                             mutated.instructions[instr_idx].slots[next_slot] = random.choice(next_valid)
-        
+
         elif mutation_type == 'add':
             # Add new instruction
             mutated.add_instruction_interactive()
-        
+
         elif mutation_type == 'remove' and len(mutated.instructions) > 1:
             # Remove random instruction
             idx = random.randint(0, len(mutated.instructions) - 1)
             mutated.instructions.pop(idx)
-        
+
         mutated._signature = None
         mutated._effective_instructions = None
         mutated.fitness = None
         mutated.generation = genome.generation
         return mutated
-    
+
     def crossover(self, parent1: GFSLGenome, parent2: GFSLGenome) -> GFSLGenome:
         """Crossover two genomes"""
         child = GFSLGenome(parent1.genome_type)
-        
+
         # Single-point crossover
         if parent1.instructions and parent2.instructions:
             point1 = random.randint(0, len(parent1.instructions))
             point2 = random.randint(0, len(parent2.instructions))
-            
+
             # Take instructions from both parents
             for instr in parent1.instructions[:point1]:
                 child.add_instruction(instr)
             for instr in parent2.instructions[point2:]:
                 child.add_instruction(instr)
-        
+
         # Inherit outputs from random parent
         parent_outputs = random.choice([parent1.outputs, parent2.outputs])
         child.outputs = parent_outputs.copy()
-        
+
         return child
-    
+
     def evolve(self, generations: int, evaluator: Callable[[GFSLGenome], float],
-              progress_callback: Optional[Callable[[int, GFSLGenome, float], None]] = None):
+               progress_callback: Optional[Callable[[int, GFSLGenome, float], None]] = None):
         """
         Main evolution loop.
-        
+
         Args:
             generations: Number of generations to evolve
             evaluator: Fitness function
@@ -1538,7 +1580,7 @@ class GFSLEvolver:
         """
         for gen in range(generations):
             self.generation = gen
-            
+
             # Evaluate population
             for genome in self.population:
                 if genome.fitness is None:
@@ -1546,43 +1588,43 @@ class GFSLEvolver:
                         genome.fitness = evaluator(genome)
                     except Exception:
                         genome.fitness = -float('inf')
-            
+
             # Sort by fitness
             self.population.sort(key=lambda g: g.fitness or -float('inf'), reverse=True)
 
             if self.supervised_guide:
                 self.supervised_guide.observe_population(self.population)
-            
+
             # Progress callback
             if progress_callback and self.population:
                 best = self.population[0]
                 progress_callback(gen, best, best.fitness or -float('inf'))
-            
+
             # Print progress
             if self.population and gen % 10 == 0:
                 best = self.population[0]
                 effective_size = len(best.extract_effective_algorithm())
                 print(f"Gen {gen:03d}: Best Fitness={best.fitness:.4f}, "
                       f"Effective Size={effective_size}/{len(best.instructions)}")
-            
+
             # Create next generation
             elite_size = int(self.population_size * self.elite_ratio)
             new_population = self.population[:elite_size]
-            
+
             while len(new_population) < self.population_size:
                 # Selection
                 parent1 = self._tournament_select()
                 parent2 = self._tournament_select()
-                
+
                 # Crossover
                 if random.random() < self.crossover_rate:
                     child = self.crossover(parent1, parent2)
                 else:
                     child = copy.deepcopy(random.choice([parent1, parent2]))
-                
+
                 child.fitness = None
                 child.generation = gen + 1
-                
+
                 # Mutation
                 if random.random() < self.mutation_rate:
                     if self.supervised_guide:
@@ -1591,19 +1633,20 @@ class GFSLEvolver:
                         child = self.mutate(child)
                     child.fitness = None
                     child.generation = gen + 1
-                
+
                 # Add if unique
                 sig = child.get_signature()
                 if sig not in self.diversity_cache:
                     self.diversity_cache.add(sig)
                     new_population.append(child)
-            
+
             self.population = new_population[:self.population_size]
-    
+
     def _tournament_select(self, tournament_size: int = 3) -> GFSLGenome:
         """Tournament selection"""
         tournament = random.sample(self.population, min(tournament_size, len(self.population)))
         return max(tournament, key=lambda g: g.fitness or -float('inf'))
+
 
 # ============================================================================
 # Q-LEARNING INTEGRATION
@@ -1614,71 +1657,71 @@ class GFSLQLearningGuide:
     Q-Learning agent for guiding GFSL instruction construction.
     Learns which slot values work best given previous slots.
     """
-    
+
     def __init__(self, learning_rate: float = 0.1, epsilon: float = 0.1):
         self.learning_rate = learning_rate
         self.epsilon = epsilon
         self.discount_factor = 0.95
-        
+
         # Q-table: (slot_index, previous_slots_hash, action) -> Q-value
         self.q_table = defaultdict(lambda: defaultdict(float))
         self.experience_buffer = deque(maxlen=1000)
-    
+
     def get_state_key(self, instruction: GFSLInstruction, slot_index: int) -> str:
         """Generate state key from previous slots"""
         prev_slots = instruction.slots[:slot_index]
         return f"{slot_index}:{':'.join(str(s) for s in prev_slots)}"
-    
+
     def choose_action(self, instruction: GFSLInstruction, slot_index: int,
-                     valid_options: List[int]) -> int:
+                      valid_options: List[int]) -> int:
         """Choose slot value using epsilon-greedy policy"""
         if random.random() < self.epsilon:
             return random.choice(valid_options)
-        
+
         state_key = self.get_state_key(instruction, slot_index)
         q_values = self.q_table[state_key]
-        
+
         # Get Q-values for valid options
         valid_q = {opt: q_values.get(opt, 0.0) for opt in valid_options}
-        
+
         if not valid_q:
             return random.choice(valid_options)
-        
+
         # Choose action with highest Q-value
         max_q = max(valid_q.values())
         best_actions = [a for a, q in valid_q.items() if q == max_q]
         return random.choice(best_actions)
-    
+
     def build_instruction(self, validator: SlotValidator) -> GFSLInstruction:
         """Build instruction using Q-learning guidance"""
         instruction = GFSLInstruction()
         states_actions = []
-        
+
         for slot_idx in range(10):
             valid_options = validator.get_valid_options(instruction, slot_idx)
             if not valid_options:
                 valid_options = [0]
-            
+
             state_key = self.get_state_key(instruction, slot_idx)
             action = self.choose_action(instruction, slot_idx, valid_options)
-            
+
             instruction.slots[slot_idx] = action
             states_actions.append((state_key, action))
-        
+
         return instruction, states_actions
-    
-    def update_from_fitness(self, states_actions: List[Tuple[str, int]], 
-                           fitness: float):
+
+    def update_from_fitness(self, states_actions: List[Tuple[str, int]],
+                            fitness: float):
         """Update Q-values based on fitness reward"""
         # Use fitness as terminal reward
         reward = fitness
-        
+
         # Update Q-values in reverse order (backward through slots)
         for i in range(len(states_actions) - 1, -1, -1):
             state_key, action = states_actions[i]
-            
+
             current_q = self.q_table[state_key][action]
-            
+
             if i == len(states_actions) - 1:
                 # Terminal state
                 new_q = current_q + self.learning_rate * (reward - current_q)
@@ -1687,9 +1730,10 @@ class GFSLQLearningGuide:
                 next_state, next_action = states_actions[i + 1]
                 next_q = self.q_table[next_state][next_action]
                 new_q = current_q + self.learning_rate * (
-                    reward + self.discount_factor * next_q - current_q)
-            
+                        reward + self.discount_factor * next_q - current_q)
+
             self.q_table[state_key][action] = new_q
+
 
 # ============================================================================
 # SUPERVISED EVOLUTION GUIDE
@@ -1707,10 +1751,10 @@ class GFSLFeatureExtractor:
         self.data_types = list(DataType)
         self.base_features = 8
         self.feature_dim = (
-            self.base_features
-            + len(self.operations)
-            + len(self.categories)
-            + len(self.data_types) * 2
+                self.base_features
+                + len(self.operations)
+                + len(self.categories)
+                + len(self.data_types) * 2
         )
 
     def encode(self, genome: GFSLGenome) -> torch.Tensor:
@@ -1767,13 +1811,13 @@ class GFSLFeatureExtractor:
                 target_dtype = DataType(instr.target_type)
                 target_type_counts[target_dtype] += 1
                 if target_dtype == DataType.TENSOR or (
-                    custom_op and custom_op.target_type == DataType.TENSOR
+                        custom_op and custom_op.target_type == DataType.TENSOR
                 ):
                     tensor_flag = True
 
             for source_cat_int, source_type_int in (
-                (instr.source1_cat, instr.source1_type),
-                (instr.source2_cat, instr.source2_type),
+                    (instr.source1_cat, instr.source1_type),
+                    (instr.source2_cat, instr.source2_type),
             ):
                 source_cat = Category(source_cat_int)
                 if source_cat == Category.NONE:
@@ -1855,15 +1899,15 @@ class GFSLSupervisedGuide:
     """Supervised PyTorch model that nudges evolution toward promising genomes."""
 
     def __init__(
-        self,
-        hidden_layers: Optional[List[int]] = None,
-        buffer_size: int = 512,
-        min_buffer: int = 64,
-        batch_size: int = 64,
-        epochs: int = 3,
-        candidate_pool: int = 3,
-        max_observations: int = 20,
-        device: Optional[str] = None,
+            self,
+            hidden_layers: Optional[List[int]] = None,
+            buffer_size: int = 512,
+            min_buffer: int = 64,
+            batch_size: int = 64,
+            epochs: int = 3,
+            candidate_pool: int = 3,
+            max_observations: int = 20,
+            device: Optional[str] = None,
     ):
         self.feature_extractor = GFSLFeatureExtractor()
         self.model = GFSLSupervisedDirectionModel(
@@ -1994,29 +2038,29 @@ class GFSLSupervisedGuide:
 def example_formula_discovery():
     """Example: Discover mathematical formulas"""
     print("=== GFSL Formula Discovery ===\n")
-    
+
     # Create test cases for formula: y = x^2 + 2x + 1
     test_cases = []
     expected_outputs = []
-    
+
     for x in range(-5, 6):
         test_cases.append({"d$0": float(x)})  # Input: x
-        expected_outputs.append({"d$1": float(x**2 + 2*x + 1)})  # Output: y
-    
+        expected_outputs.append({"d$1": float(x ** 2 + 2 * x + 1)})  # Output: y
+
     # Create evaluator
     evaluator_obj = RealTimeEvaluator(test_cases, expected_outputs)
-    
+
     def fitness_func(genome):
         return evaluator_obj.evaluate(genome)
-    
+
     # Initialize evolver
     evolver = GFSLEvolver(population_size=30)
     evolver.initialize_population("algorithm", initial_instructions=15)
-    
+
     # Mark d$1 as output for all genomes
     for genome in evolver.population:
         genome.mark_output(DataType.DECIMAL, 1)
-    
+
     # Evolve
     def progress_callback(gen, best_genome, best_fitness):
         if gen % 20 == 0:
@@ -2026,9 +2070,9 @@ def example_formula_discovery():
             for line in best_genome.to_human_readable():
                 if line.startswith("✓"):
                     print(f"    {line}")
-    
+
     evolver.evolve(100, fitness_func, progress_callback)
-    
+
     # Show best solution
     best = evolver.population[0]
     print("\n=== Best Formula Found ===")
@@ -2037,28 +2081,29 @@ def example_formula_discovery():
     print("\nFull Algorithm:")
     for line in best.to_human_readable():
         print(f"  {line}")
-    
+
     # Test the formula
     print("\n=== Testing Formula ===")
     executor = GFSLExecutor()
     for x in [-2, 0, 1, 3]:
         result = executor.execute(best, {"d$0": float(x)})
-        expected = x**2 + 2*x + 1
+        expected = x ** 2 + 2 * x + 1
         print(f"  x={x}: Result={result.get('d$1', 0):.2f}, Expected={expected:.2f}")
+
 
 def example_neural_architecture_search():
     """Example: Evolve neural network architecture"""
     print("\n=== GFSL Neural Architecture Search ===\n")
-    
+
     # Create model builder
     builder = RecursiveModelBuilder()
-    
+
     # Create a genome with neural instructions
     genome = GFSLGenome("neural")
-    
+
     # Activate tensor type
     genome.validator.activate_type(DataType.TENSOR)
-    
+
     # Build a simple CNN using GFSL instructions
     # SET CHANNELS = 32
     set_channels = GFSLInstruction([
@@ -2067,7 +2112,7 @@ def example_neural_architecture_search():
         Category.VALUE, DataType.DECIMAL, 5  # Index 5 -> 64 channels
     ])
     genome.add_instruction(set_channels)
-    
+
     # SET KERNEL = 3
     set_kernel = GFSLInstruction([
         Category.NONE, DataType.NONE, 0, Operation.SET,
@@ -2075,7 +2120,7 @@ def example_neural_architecture_search():
         Category.VALUE, DataType.DECIMAL, 1  # Index 1 -> kernel size 3
     ])
     genome.add_instruction(set_kernel)
-    
+
     # t$0 = CONV(t$0)
     conv = GFSLInstruction([
         Category.VARIABLE, DataType.TENSOR, 0, Operation.CONV,
@@ -2083,7 +2128,7 @@ def example_neural_architecture_search():
         Category.NONE, DataType.NONE, 0
     ])
     genome.add_instruction(conv)
-    
+
     # t$0 = RELU(t$0)
     relu = GFSLInstruction([
         Category.VARIABLE, DataType.TENSOR, 0, Operation.RELU,
@@ -2091,23 +2136,24 @@ def example_neural_architecture_search():
         Category.NONE, DataType.NONE, 0
     ])
     genome.add_instruction(relu)
-    
+
     # Build PyTorch model
     model = builder.build_from_genome(genome, (3, 32, 32))
-    
+
     print("Generated Model Architecture:")
     print(model)
-    
+
     # Test with random input
     x = torch.randn(1, 3, 32, 32)
     y = model(x)
     print(f"\nInput shape: {x.shape}")
     print(f"Output shape: {y.shape}")
-    
+
     # Show genome in readable format
     print("\nGFSL Instructions:")
     for line in genome.to_human_readable():
         print(f"  {line}")
+
 
 if __name__ == "__main__":
     # Run examples
