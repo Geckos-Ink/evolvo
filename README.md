@@ -2,7 +2,7 @@
 
 GFSL-aligned evolutionary search engine with supervised PyTorch guidance.
 
-The project reimplements the **Genetic Fixed Structure Language (GFSL)** as described in the “GFSL Basic” and “GFSL Extensibility” papers. Evolvo keeps the strictly numeric, 7-slot compressed instruction encoding while extending the framework with learning-based direction models that bias evolution toward higher-fitness regions.
+The project reimplements the **Genetic Fixed Structure Language (GFSL)** as described in the “GFSL Basic” and “GFSL Extensibility” papers. Evolvo keeps the strictly numeric, compressed instruction encoding (default 7 slots, auto-sized to the maximum declared expression length) while extending the framework with learning-based direction models that bias evolution toward higher-fitness regions.
 
 > 📄 The original specifications live in [`papers/`](papers); start with [`GFSL-definition.md`](papers/GFSL-definition.md).
 
@@ -10,7 +10,7 @@ The project reimplements the **Genetic Fixed Structure Language (GFSL)** as desc
 
 ## Highlights
 
-- **Fixed 7-slot compressed genome language** that guarantees every instruction is valid by construction.
+- **Fixed compressed genome language** (default 7 slots, auto-sized to max expression length) that guarantees every instruction is valid by construction.
 - **Cascading slot validator** with progressive type activation (decimal → boolean → tensor) and context-aware enumerations.
 - **Effective algorithm extraction** so execution only touches the instructions that matter.
 - **Neural architecture support** via `RecursiveModelBuilder`, enabling GFSL to describe CNN/MLP topologies.

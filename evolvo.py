@@ -11,8 +11,9 @@ toward promising regions of the search space.
 
 Core ideas carried over from the papers:
 
-1. **Fixed 7-Slot Instructions (Compressed)**: Each instruction is a fixed-length
-   slot vector representing target/op/source addresses
+1. **Fixed Slot Instructions (Compressed)**: Each instruction is a fixed-length
+   slot vector representing target/op/source addresses (default 7 slots, auto-sized
+   to the maximum declared expression length)
 2. **Cascading Validity**: Each slot's options depend entirely on previous slots
 3. **Progressive Type System**: Types activate based on problem complexity
 4. **Context-Dependent Enumerations**: Values selected from operation-specific lists
@@ -20,7 +21,7 @@ Core ideas carried over from the papers:
 6. **Unified Evolution**: Common framework for algorithms and neural architectures
 
 Additional enhancements:
-- GFSLInstruction: Fixed 7-slot instruction representation (compressed pointers)
+- GFSLInstruction: Fixed compressed instruction representation (auto-sized)
 - SlotValidator: Enforces cascading validity constraints
 - GFSLGenome: Algorithm/Neural genome with slot-based instructions
 - EffectiveAlgorithmExtractor: Removes junk genome
@@ -592,12 +593,14 @@ def infer_source_type(op_code: int, source_index: int) -> int:
 @dataclass
 class GFSLInstruction:
     """
-    Fixed 7-slot instruction representation (compressed pointers).
+    Fixed-slot instruction representation (compressed pointers).
     Each slot is an integer index.
     """
     slots: List[int]
 
-    def __init__(self, slots: Optional[List[int]] = None, slot_count: int = DEFAULT_SLOT_COUNT):
+    def __init__(self, slots: Optional[List[int]] = None, slot_count: Optional[int] = None):
+        if slot_count is None:
+            slot_count = len(slots) if slots is not None else DEFAULT_SLOT_COUNT
         if slots is None:
             # Initialize with NONE instruction
             self.slots = [0] * slot_count
@@ -605,13 +608,25 @@ class GFSLInstruction:
             assert len(slots) == slot_count, f"Instruction must have exactly {slot_count} slots"
             self.slots = slots
 
+    def slot_value(self, index: int) -> int:
+        """Return slot value or 0 when index is out of range."""
+        if index < 0 or index >= len(self.slots):
+            return 0
+        return self.slots[index]
+
+    def pad_to(self, slot_count: int) -> None:
+        """Pad slots with zeros to reach the requested slot count."""
+        if slot_count <= len(self.slots):
+            return
+        self.slots.extend([0] * (slot_count - len(self.slots)))
+
     @property
     def target_cat(self) -> int:
-        return self.slots[SLOT_TARGET_CAT]
+        return self.slot_value(SLOT_TARGET_CAT)
 
     @property
     def target_spec(self) -> int:
-        return self.slots[SLOT_TARGET_SPEC]
+        return self.slot_value(SLOT_TARGET_SPEC)
 
     @property
     def target_type(self) -> int:
@@ -629,15 +644,15 @@ class GFSLInstruction:
 
     @property
     def operation(self) -> int:
-        return self.slots[SLOT_OPERATION]
+        return self.slot_value(SLOT_OPERATION)
 
     @property
     def source1_cat(self) -> int:
-        return self.slots[SLOT_SOURCE1_CAT]
+        return self.slot_value(SLOT_SOURCE1_CAT)
 
     @property
     def source1_spec(self) -> int:
-        return self.slots[SLOT_SOURCE1_SPEC]
+        return self.slot_value(SLOT_SOURCE1_SPEC)
 
     @property
     def source1_type(self) -> int:
@@ -659,11 +674,11 @@ class GFSLInstruction:
 
     @property
     def source2_cat(self) -> int:
-        return self.slots[SLOT_SOURCE2_CAT]
+        return self.slot_value(SLOT_SOURCE2_CAT)
 
     @property
     def source2_spec(self) -> int:
-        return self.slots[SLOT_SOURCE2_SPEC]
+        return self.slot_value(SLOT_SOURCE2_SPEC)
 
     @property
     def source2_type(self) -> int:
@@ -706,8 +721,8 @@ class SlotValidator:
     depend entirely on all previous slots.
     """
 
-    def __init__(self):
-        self.slot_count = DEFAULT_SLOT_COUNT
+    def __init__(self, slot_count: int = DEFAULT_SLOT_COUNT):
+        self.slot_count = int(slot_count)
         self.active_types = {DataType.DECIMAL}  # Start with decimal only
         self.variable_counts = defaultdict(int)  # Track allocated variables
         self.constant_counts = defaultdict(int)  # Track defined constants
@@ -771,7 +786,7 @@ class SlotValidator:
             return [Category.NONE, Category.VARIABLE, Category.CONSTANT]
 
         if slot_index == SLOT_TARGET_SPEC:
-            target_cat = instruction.slots[SLOT_TARGET_CAT]
+            target_cat = instruction.slot_value(SLOT_TARGET_CAT)
             if target_cat == Category.NONE:
                 return [0]
             if target_cat == Category.VARIABLE:
@@ -784,8 +799,8 @@ class SlotValidator:
             return []
 
         if slot_index == SLOT_OPERATION:
-            target_cat = instruction.slots[SLOT_TARGET_CAT]
-            target_spec = instruction.slots[SLOT_TARGET_SPEC]
+            target_cat = instruction.slot_value(SLOT_TARGET_CAT)
+            target_spec = instruction.slot_value(SLOT_TARGET_SPEC)
             target_type = int(DataType.NONE)
             if target_cat in (Category.VARIABLE, Category.CONSTANT):
                 target_type, _ = unpack_type_index(target_spec)
@@ -814,7 +829,7 @@ class SlotValidator:
             return result_ops
 
         if slot_index == SLOT_SOURCE1_CAT:
-            op = instruction.slots[SLOT_OPERATION]
+            op = instruction.slot_value(SLOT_OPERATION)
             custom_op = custom_operations.get(op)
             if custom_op:
                 allowed = custom_operations.allowed_categories(op, 1)
@@ -833,8 +848,8 @@ class SlotValidator:
             return [Category.VARIABLE, Category.CONSTANT, Category.VALUE]
 
         if slot_index == SLOT_SOURCE1_SPEC:
-            source1_cat = instruction.slots[SLOT_SOURCE1_CAT]
-            op = instruction.slots[SLOT_OPERATION]
+            source1_cat = instruction.slot_value(SLOT_SOURCE1_CAT)
+            op = instruction.slot_value(SLOT_OPERATION)
             custom_op = custom_operations.get(op)
             if source1_cat == Category.NONE:
                 return [0]
@@ -871,7 +886,7 @@ class SlotValidator:
             return []
 
         if slot_index == SLOT_SOURCE2_CAT:
-            op = instruction.slots[SLOT_OPERATION]
+            op = instruction.slot_value(SLOT_OPERATION)
             custom_op = custom_operations.get(op)
             if custom_op:
                 if custom_operations.arity(op) < 2:
@@ -888,8 +903,8 @@ class SlotValidator:
             return [Category.NONE]
 
         if slot_index == SLOT_SOURCE2_SPEC:
-            source2_cat = instruction.slots[SLOT_SOURCE2_CAT]
-            op = instruction.slots[SLOT_OPERATION]
+            source2_cat = instruction.slot_value(SLOT_SOURCE2_CAT)
+            op = instruction.slot_value(SLOT_OPERATION)
             custom_op = custom_operations.get(op)
             if source2_cat == Category.NONE:
                 return [0]
@@ -917,8 +932,8 @@ class SlotValidator:
 
             if source2_cat == Category.VALUE:
                 prop = None
-                if op == Operation.SET and instruction.slots[SLOT_SOURCE1_CAT] == Category.CONFIG:
-                    prop = self._coerce_config_property(instruction.slots[SLOT_SOURCE1_SPEC])
+                if op == Operation.SET and instruction.slot_value(SLOT_SOURCE1_CAT) == Category.CONFIG:
+                    prop = self._coerce_config_property(instruction.slot_value(SLOT_SOURCE1_SPEC))
                 return self._value_option_indices(op, prop)
 
             return []
@@ -927,6 +942,10 @@ class SlotValidator:
 
     def _prob_state_key(self, instruction: GFSLInstruction, slot_index: int) -> Tuple[int, Tuple[int, ...]]:
         return slot_index, tuple(instruction.slots[:slot_index])
+
+    def _ensure_instruction_slots(self, instruction: GFSLInstruction) -> None:
+        if len(instruction.slots) < self.slot_count:
+            instruction.pad_to(self.slot_count)
 
     def _completion_probability(self, instruction: GFSLInstruction, slot_index: int,
                                 cache: Dict[Tuple[int, Tuple[int, ...]], float],
@@ -958,6 +977,7 @@ class SlotValidator:
     def option_success_probabilities(self, instruction: GFSLInstruction, slot_index: int,
                                      max_branching: int = DEFAULT_PROBABILITY_BRANCHING) -> Dict[int, float]:
         """Return probability of completing an instruction for each slot option."""
+        self._ensure_instruction_slots(instruction)
         options = self.get_valid_options(instruction, slot_index)
         if not options:
             return {}
@@ -985,6 +1005,7 @@ class SlotValidator:
     def choose_option(self, instruction: GFSLInstruction, slot_index: int,
                       max_branching: int = DEFAULT_PROBABILITY_BRANCHING) -> int:
         """Choose a slot option biased toward successful completion."""
+        self._ensure_instruction_slots(instruction)
         valid_options = self.get_valid_options(instruction, slot_index)
         if not valid_options:
             raise ValueError(f"No valid options for slot {slot_index}.")
@@ -1002,6 +1023,7 @@ class SlotValidator:
     def build_probability_tree(self, instruction: GFSLInstruction, slot_index: int = 0,
                                max_branching: int = 32) -> Dict[int, Dict[str, Any]]:
         """Return a bounded probability tree for instruction completion."""
+        self._ensure_instruction_slots(instruction)
         if slot_index >= self.slot_count:
             return {}
         options = self.get_valid_options(instruction, slot_index)
@@ -1070,21 +1092,35 @@ class GFSLGenome:
     Supports both algorithmic and neural network representations.
     """
 
-    def __init__(self, genome_type: str = "algorithm"):
+    def __init__(self, genome_type: str = "algorithm",
+                 slot_count: Optional[int] = None,
+                 auto_slot_count: bool = True):
         self.genome_type = genome_type
         self.instructions: List[GFSLInstruction] = []
-        self.validator = SlotValidator()
+        self.auto_slot_count = auto_slot_count
+        if slot_count is None:
+            slot_count = DEFAULT_SLOT_COUNT
+        self.validator = SlotValidator(slot_count=slot_count)
         self.outputs: List[Tuple[int, int, int]] = []  # (category, type, index)
         self.fitness: Optional[float] = None
         self.generation: int = 0
         self._signature: Optional[str] = None
         self._effective_instructions: Optional[List[int]] = None
 
+    def _ensure_slot_count(self, slot_count: int) -> None:
+        if slot_count <= self.validator.slot_count:
+            return
+        for instr in self.instructions:
+            instr.pad_to(slot_count)
+        self.validator.slot_count = slot_count
+
     def add_instruction_interactive(self, max_attempts: int = 25) -> GFSLInstruction:
         """
         Build instruction slot-by-slot with cascading validity.
         This is the key method for Q-learning integration.
         """
+        if self.validator.slot_count == 0:
+            self._ensure_slot_count(DEFAULT_SLOT_COUNT)
         last_error: Optional[Exception] = None
         for _ in range(max_attempts):
             instruction = GFSLInstruction(slot_count=self.validator.slot_count)
@@ -1108,18 +1144,27 @@ class GFSLGenome:
 
     def add_instruction(self, instruction: GFSLInstruction) -> bool:
         """Add a complete instruction with validation"""
-        if len(instruction.slots) != self.validator.slot_count:
-            return False
+        instr_copy = instruction.copy()
+        if self.auto_slot_count and not self.instructions:
+            if len(instr_copy.slots) > 0:
+                self.validator.slot_count = len(instr_copy.slots)
+        if len(instr_copy.slots) > self.validator.slot_count:
+            if self.auto_slot_count:
+                self._ensure_slot_count(len(instr_copy.slots))
+            else:
+                return False
+        if len(instr_copy.slots) < self.validator.slot_count:
+            instr_copy.pad_to(self.validator.slot_count)
         # Validate each slot against current state
         test_instr = GFSLInstruction(slot_count=self.validator.slot_count)
         for slot_idx in range(self.validator.slot_count):
             valid_options = self.validator.get_valid_options(test_instr, slot_idx)
-            if instruction.slots[slot_idx] not in valid_options:
+            if instr_copy.slots[slot_idx] not in valid_options:
                 return False
-            test_instr.slots[slot_idx] = instruction.slots[slot_idx]
+            test_instr.slots[slot_idx] = instr_copy.slots[slot_idx]
 
-        self.instructions.append(instruction.copy())
-        self.validator.update_state(instruction)
+        self.instructions.append(instr_copy)
+        self.validator.update_state(instr_copy)
         self._signature = None
         self._effective_instructions = None
 
@@ -1957,6 +2002,8 @@ class GFSLQLearningGuide:
     def build_instruction(self, validator: SlotValidator,
                           max_attempts: int = 25) -> Tuple[GFSLInstruction, List[Tuple[str, int]]]:
         """Build instruction using Q-learning guidance."""
+        if validator.slot_count == 0:
+            validator.slot_count = DEFAULT_SLOT_COUNT
         last_error: Optional[Exception] = None
         for _ in range(max_attempts):
             instruction = GFSLInstruction(slot_count=validator.slot_count)
