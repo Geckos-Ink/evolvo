@@ -41,6 +41,7 @@ import hashlib
 import json
 import copy
 import inspect
+import heapq
 from typing import List, Dict, Any, Tuple, Optional, Union, Set, Callable
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -1580,6 +1581,227 @@ class GFSLGenome:
         self.outputs.append((Category.VARIABLE, var_type, var_index))
         self._effective_instructions = None
 
+    def _build_dependency_graph(
+        self,
+    ) -> Tuple[Dict[int, Set[int]], Dict[Tuple[int, int, int], int]]:
+        """Build data dependency graph and latest producers by target address."""
+        dependencies: Dict[int, Set[int]] = defaultdict(set)
+        producers: Dict[Tuple[int, int, int], int] = {}
+
+        for idx, instr in enumerate(self.instructions):
+            if instr.target_cat != Category.NONE:
+                target_key = (int(instr.target_cat), int(instr.target_type), int(instr.target_index))
+                producers[target_key] = idx
+
+            if instr.source1_cat in (Category.VARIABLE, Category.CONSTANT):
+                source_key = (int(instr.source1_cat), int(instr.source1_type), int(instr.source1_value))
+                if source_key in producers:
+                    dependencies[idx].add(producers[source_key])
+
+            if instr.source2_cat in (Category.VARIABLE, Category.CONSTANT):
+                source_key = (int(instr.source2_cat), int(instr.source2_type), int(instr.source2_value))
+                if source_key in producers:
+                    dependencies[idx].add(producers[source_key])
+
+        return dependencies, producers
+
+    @staticmethod
+    def _looks_like_reference(ref: Any) -> bool:
+        if not isinstance(ref, (tuple, list)):
+            return False
+        if len(ref) == 2:
+            return isinstance(ref[0], (int, DataType)) and isinstance(ref[1], int)
+        if len(ref) == 3:
+            return (
+                isinstance(ref[0], (int, Category))
+                and isinstance(ref[1], (int, DataType))
+                and isinstance(ref[2], int)
+            )
+        return False
+
+    @staticmethod
+    def _coerce_result_reference(ref: Any) -> Tuple[int, int, int]:
+        if isinstance(ref, str):
+            text = ref.strip()
+            if not text:
+                raise ValueError("Result reference string is empty.")
+            if "$" in text:
+                dtype_char, idx_str = text.split("$", 1)
+                cat = Category.VARIABLE
+            elif "#" in text:
+                dtype_char, idx_str = text.split("#", 1)
+                cat = Category.CONSTANT
+            else:
+                raise ValueError(
+                    f"Result reference '{ref}' must include '$' or '#'."
+                )
+            dtype_map = {
+                "b": DataType.BOOLEAN,
+                "d": DataType.DECIMAL,
+                "t": DataType.TENSOR,
+            }
+            dtype = dtype_map.get(dtype_char.lower())
+            if dtype is None:
+                raise ValueError(f"Unknown dtype prefix '{dtype_char}' in '{ref}'.")
+            return int(cat), int(dtype), int(idx_str)
+
+        if isinstance(ref, dict):
+            cat = ref.get("category", ref.get("cat", Category.VARIABLE))
+            dtype = ref.get("dtype", ref.get("type"))
+            index = ref.get("index", ref.get("idx"))
+        elif isinstance(ref, (tuple, list)):
+            if len(ref) == 2:
+                cat = Category.VARIABLE
+                dtype, index = ref
+            elif len(ref) == 3:
+                cat, dtype, index = ref
+            else:
+                raise ValueError(
+                    "Tuple/list result references must be (dtype, index) or (category, dtype, index)."
+                )
+        else:
+            raise ValueError(
+                "Result references must be a string, tuple/list, or dict."
+            )
+
+        if dtype is None or index is None:
+            raise ValueError("Result references must include dtype and index.")
+
+        cat_enum = Category(cat)
+        if cat_enum not in (Category.VARIABLE, Category.CONSTANT):
+            raise ValueError("Result references must target a variable or constant.")
+        return int(cat_enum), int(DataType(dtype)), int(index)
+
+    def _normalize_result_references(self, result_refs: Any) -> List[Tuple[int, int, int]]:
+        if result_refs is None:
+            return []
+
+        if isinstance(result_refs, (str, dict)) or self._looks_like_reference(result_refs):
+            refs = [result_refs]
+        elif isinstance(result_refs, set):
+            refs = list(result_refs)
+        elif isinstance(result_refs, (list, tuple)):
+            refs = list(result_refs)
+        else:
+            refs = [result_refs]
+
+        normalized: List[Tuple[int, int, int]] = []
+        for ref in refs:
+            normalized.append(self._coerce_result_reference(ref))
+        return normalized
+
+    @staticmethod
+    def _collect_required_indices(
+        output_refs: List[Tuple[int, int, int]],
+        dependencies: Dict[int, Set[int]],
+        producers: Dict[Tuple[int, int, int], int],
+    ) -> Set[int]:
+        effective: Set[int] = set()
+        to_check: List[int] = []
+
+        for output in output_refs:
+            key = (int(output[0]), int(output[1]), int(output[2]))
+            if key in producers:
+                to_check.append(producers[key])
+
+        while to_check:
+            idx = to_check.pop()
+            if idx in effective:
+                continue
+            effective.add(idx)
+            for dep_idx in dependencies.get(idx, ()):
+                to_check.append(dep_idx)
+
+        return effective
+
+    def _instruction_sort_key(self, instr: GFSLInstruction) -> Tuple[int, ...]:
+        return tuple(int(s) for s in instr.slots)
+
+    def _order_operation_indices(
+        self,
+        indices: Set[int],
+        dependencies: Dict[int, Set[int]],
+        order: str,
+    ) -> List[int]:
+        if not indices:
+            return []
+
+        order_key = order.lower().strip()
+        if order_key in {"execution", "original", "index"}:
+            return sorted(indices)
+
+        key_map = {idx: self._instruction_sort_key(self.instructions[idx]) for idx in indices}
+
+        if order_key in {"canonical", "fixed", "slots", "slot"}:
+            return sorted(indices, key=lambda i: (key_map[i], i))
+
+        if order_key in {"topological", "dependency", "deps"}:
+            indegree = {idx: 0 for idx in indices}
+            dependents: Dict[int, Set[int]] = defaultdict(set)
+
+            for idx in indices:
+                for dep_idx in dependencies.get(idx, ()):
+                    if dep_idx in indices:
+                        indegree[idx] += 1
+                        dependents[dep_idx].add(idx)
+
+            heap: List[Tuple[Tuple[int, ...], int]] = []
+            for idx, deg in indegree.items():
+                if deg == 0:
+                    heapq.heappush(heap, (key_map[idx], idx))
+
+            ordered: List[int] = []
+            while heap:
+                _, idx = heapq.heappop(heap)
+                ordered.append(idx)
+                for child in dependents.get(idx, ()):
+                    indegree[child] -= 1
+                    if indegree[child] == 0:
+                        heapq.heappush(heap, (key_map[child], child))
+
+            if len(ordered) != len(indices):
+                return sorted(indices, key=lambda i: (key_map[i], i))
+            return ordered
+
+        raise ValueError(
+            f"Unknown order '{order}'. Use 'execution', 'topological', or 'fixed'."
+        )
+
+    def extract_operation_indices(
+        self,
+        result_refs: Optional[Any] = None,
+        *,
+        order: str = "fixed",
+    ) -> List[int]:
+        """
+        Extract instruction indices required to compute the requested result references.
+        Order 'fixed' sorts by slot values (enumerator order) for stable comparisons.
+        """
+        dependencies, producers = self._build_dependency_graph()
+
+        if result_refs is None:
+            if not self.outputs:
+                indices = set(range(len(self.instructions)))
+                return self._order_operation_indices(indices, dependencies, order)
+            output_refs = self._normalize_result_references(self.outputs)
+        else:
+            output_refs = self._normalize_result_references(result_refs)
+            if not output_refs:
+                return []
+
+        effective = self._collect_required_indices(output_refs, dependencies, producers)
+        return self._order_operation_indices(effective, dependencies, order)
+
+    def extract_operations(
+        self,
+        result_refs: Optional[Any] = None,
+        *,
+        order: str = "fixed",
+    ) -> List[GFSLInstruction]:
+        """Return the instructions needed for the requested result references."""
+        indices = self.extract_operation_indices(result_refs, order=order)
+        return [self.instructions[idx] for idx in indices]
+
     def extract_effective_algorithm(self) -> List[int]:
         """
         Extract effective algorithm by tracing dependencies backward from outputs.
@@ -1593,44 +1815,9 @@ class GFSLGenome:
             self._effective_instructions = list(range(len(self.instructions)))
             return self._effective_instructions
 
-        # Build dependency graph
-        dependencies = defaultdict(set)  # instruction_idx -> set of instruction_idx it depends on
-        producers = {}  # (category, type, index) -> instruction_idx that produces it
-
-        for idx, instr in enumerate(self.instructions):
-            # Record what this instruction produces
-            if instr.target_cat != Category.NONE:
-                target_key = (instr.target_cat, instr.target_type, instr.target_index)
-                producers[target_key] = idx
-
-            # Record dependencies
-            if instr.source1_cat in [Category.VARIABLE, Category.CONSTANT]:
-                source_key = (instr.source1_cat, instr.source1_type, instr.source1_value)
-                if source_key in producers:
-                    dependencies[idx].add(producers[source_key])
-
-            if instr.source2_cat in [Category.VARIABLE, Category.CONSTANT]:
-                source_key = (instr.source2_cat, instr.source2_type, instr.source2_value)
-                if source_key in producers:
-                    dependencies[idx].add(producers[source_key])
-
-        # Backward trace from outputs
-        effective = set()
-        to_check = []
-
-        # Find instructions that produce outputs
-        for output in self.outputs:
-            if output in producers:
-                to_check.append(producers[output])
-
-        # Trace dependencies
-        while to_check:
-            idx = to_check.pop()
-            if idx not in effective:
-                effective.add(idx)
-                for dep_idx in dependencies[idx]:
-                    to_check.append(dep_idx)
-
+        dependencies, producers = self._build_dependency_graph()
+        output_refs = self._normalize_result_references(self.outputs)
+        effective = self._collect_required_indices(output_refs, dependencies, producers)
         self._effective_instructions = sorted(effective)
         return self._effective_instructions
 

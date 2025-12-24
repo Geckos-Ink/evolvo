@@ -7,6 +7,7 @@ Usage:
   python example.py both
   python example.py expression
   python example.py neural
+  python example.py extraction
 """
 
 import random
@@ -96,10 +97,12 @@ def print_usage() -> None:
         "  both                 Run personalization then evolution\n"
         "  expression           Run examples/expression_flow.py\n"
         "  neural               Run examples/neural_flow.py\n"
+        "  extraction           Run examples/operation_extraction.py\n"
         "\n"
         "You can also run the scripts directly:\n"
         "  python examples/expression_flow.py\n"
         "  python examples/neural_flow.py\n"
+        "  python examples/operation_extraction.py\n"
     )
 
 
@@ -183,6 +186,8 @@ if __name__ == "__main__":
         run_example_script("expression_flow.py")
     elif mode in {"neural", "neural_flow"}:
         run_example_script("neural_flow.py")
+    elif mode in {"extraction", "operation", "operation_extraction"}:
+        run_example_script("operation_extraction.py")
     elif mode == "evolution":
         main()
     else:
