@@ -11,7 +11,8 @@ toward promising regions of the search space.
 
 Core ideas carried over from the papers:
 
-1. **Fixed 10-Slot Instructions**: Every instruction is exactly 10 integer indices
+1. **Fixed 7-Slot Instructions (Compressed)**: Each instruction is a fixed-length
+   slot vector representing target/op/source addresses
 2. **Cascading Validity**: Each slot's options depend entirely on previous slots
 3. **Progressive Type System**: Types activate based on problem complexity
 4. **Context-Dependent Enumerations**: Values selected from operation-specific lists
@@ -19,7 +20,7 @@ Core ideas carried over from the papers:
 6. **Unified Evolution**: Common framework for algorithms and neural architectures
 
 Additional enhancements:
-- GFSLInstruction: Fixed 10-slot instruction representation
+- GFSLInstruction: Fixed 7-slot instruction representation (compressed pointers)
 - SlotValidator: Enforces cascading validity constraints
 - GFSLGenome: Algorithm/Neural genome with slot-based instructions
 - EffectiveAlgorithmExtractor: Removes junk genome
@@ -126,6 +127,118 @@ class ConfigProperty(IntEnum):
     RATE = 5
     MOMENTUM = 6
     EPSILON = 7
+
+
+# ============================================================================
+# SLOT LAYOUT (COMPRESSED POINTERS)
+# ============================================================================
+
+ADDRESS_SLOT_COUNT = 2
+OP_SLOT_COUNT = 1
+DEFAULT_SLOT_COUNT = ADDRESS_SLOT_COUNT * 3 + OP_SLOT_COUNT
+DEFAULT_PROBABILITY_BRANCHING = 128
+
+SLOT_TARGET_CAT = 0
+SLOT_TARGET_SPEC = 1
+SLOT_OPERATION = 2
+SLOT_SOURCE1_CAT = 3
+SLOT_SOURCE1_SPEC = 4
+SLOT_SOURCE2_CAT = 5
+SLOT_SOURCE2_SPEC = 6
+
+# Layout: [target_cat, target_spec, op, source1_cat, source1_spec, source2_cat, source2_spec]
+
+SPEC_TYPE_SHIFT = 16
+SPEC_INDEX_MASK = (1 << SPEC_TYPE_SHIFT) - 1
+
+
+def pack_type_index(dtype: int, index: int) -> int:
+    """Pack a type and index into a single slot value."""
+    return (int(dtype) << SPEC_TYPE_SHIFT) | (int(index) & SPEC_INDEX_MASK)
+
+
+def unpack_type_index(packed: int) -> Tuple[int, int]:
+    """Unpack a slot value into (type, index)."""
+    return int(packed) >> SPEC_TYPE_SHIFT, int(packed) & SPEC_INDEX_MASK
+
+
+CONTROL_FLOW_OPS = [
+    Operation.IF,
+    Operation.WHILE,
+    Operation.END,
+    Operation.SET,
+    Operation.RESULT,
+]
+
+BOOLEAN_COMPARE_OPS = [
+    Operation.GT,
+    Operation.LT,
+    Operation.EQ,
+    Operation.GTE,
+    Operation.LTE,
+    Operation.NEQ,
+]
+
+BOOLEAN_LOGIC_OPS = [
+    Operation.AND,
+    Operation.OR,
+    Operation.NOT,
+]
+
+DECIMAL_OPS = [
+    Operation.ADD,
+    Operation.SUB,
+    Operation.MUL,
+    Operation.DIV,
+    Operation.POW,
+    Operation.SQRT,
+    Operation.ABS,
+    Operation.SIN,
+    Operation.COS,
+    Operation.EXP,
+    Operation.LOG,
+    Operation.MOD,
+]
+
+TENSOR_OPS = [
+    Operation.CONV,
+    Operation.LINEAR,
+    Operation.RELU,
+    Operation.POOL,
+    Operation.NORM,
+    Operation.DROPOUT,
+    Operation.SOFTMAX,
+    Operation.RESHAPE,
+    Operation.CONCAT,
+]
+
+BINARY_OPS = {
+    Operation.ADD,
+    Operation.SUB,
+    Operation.MUL,
+    Operation.DIV,
+    Operation.POW,
+    Operation.MOD,
+    Operation.AND,
+    Operation.OR,
+    Operation.GT,
+    Operation.LT,
+    Operation.EQ,
+    Operation.GTE,
+    Operation.LTE,
+    Operation.NEQ,
+    Operation.SET,
+}
+
+UNARY_OPS = {
+    Operation.NOT,
+    Operation.SQRT,
+    Operation.ABS,
+    Operation.SIN,
+    Operation.COS,
+    Operation.EXP,
+    Operation.LOG,
+}
 
 
 # ============================================================================
@@ -449,6 +562,29 @@ def register_custom_operation(
     )
 
 
+def infer_source_type(op_code: int, source_index: int) -> int:
+    """Infer the expected data type for a source position given an opcode."""
+    custom_op = custom_operations.get(op_code)
+    if custom_op:
+        dtype = custom_operations.source_type(op_code, source_index) or custom_op.target_type
+        return int(dtype) if dtype is not None else int(DataType.NONE)
+    try:
+        op = Operation(op_code)
+    except ValueError:
+        return int(DataType.NONE)
+    if op in BOOLEAN_COMPARE_OPS:
+        return int(DataType.DECIMAL)
+    if op in (Operation.AND, Operation.OR, Operation.NOT):
+        return int(DataType.BOOLEAN)
+    if op in (Operation.IF, Operation.WHILE):
+        return int(DataType.BOOLEAN)
+    if op in DECIMAL_OPS:
+        return int(DataType.DECIMAL)
+    if op in TENSOR_OPS:
+        return int(DataType.TENSOR)
+    return int(DataType.NONE)
+
+
 # ============================================================================
 # GFSL INSTRUCTION
 # ============================================================================
@@ -456,58 +592,100 @@ def register_custom_operation(
 @dataclass
 class GFSLInstruction:
     """
-    Fixed 10-slot instruction representation.
+    Fixed 7-slot instruction representation (compressed pointers).
     Each slot is an integer index.
     """
     slots: List[int]
 
-    def __init__(self, slots: Optional[List[int]] = None):
+    def __init__(self, slots: Optional[List[int]] = None, slot_count: int = DEFAULT_SLOT_COUNT):
         if slots is None:
             # Initialize with NONE instruction
-            self.slots = [0] * 10
+            self.slots = [0] * slot_count
         else:
-            assert len(slots) == 10, "Instruction must have exactly 10 slots"
+            assert len(slots) == slot_count, f"Instruction must have exactly {slot_count} slots"
             self.slots = slots
 
     @property
     def target_cat(self) -> int:
-        return self.slots[0]
+        return self.slots[SLOT_TARGET_CAT]
+
+    @property
+    def target_spec(self) -> int:
+        return self.slots[SLOT_TARGET_SPEC]
 
     @property
     def target_type(self) -> int:
-        return self.slots[1]
+        if self.target_cat in (Category.VARIABLE, Category.CONSTANT):
+            dtype, _ = unpack_type_index(self.target_spec)
+            return dtype
+        return int(DataType.NONE)
 
     @property
     def target_index(self) -> int:
-        return self.slots[2]
+        if self.target_cat in (Category.VARIABLE, Category.CONSTANT):
+            _, idx = unpack_type_index(self.target_spec)
+            return idx
+        return 0
 
     @property
     def operation(self) -> int:
-        return self.slots[3]
+        return self.slots[SLOT_OPERATION]
 
     @property
     def source1_cat(self) -> int:
-        return self.slots[4]
+        return self.slots[SLOT_SOURCE1_CAT]
+
+    @property
+    def source1_spec(self) -> int:
+        return self.slots[SLOT_SOURCE1_SPEC]
 
     @property
     def source1_type(self) -> int:
-        return self.slots[5]
+        if self.source1_cat in (Category.VARIABLE, Category.CONSTANT):
+            dtype, _ = unpack_type_index(self.source1_spec)
+            return dtype
+        if self.source1_cat == Category.VALUE:
+            return infer_source_type(self.operation, 1)
+        return int(DataType.NONE)
 
     @property
     def source1_value(self) -> int:
-        return self.slots[6]
+        if self.source1_cat in (Category.VARIABLE, Category.CONSTANT):
+            _, idx = unpack_type_index(self.source1_spec)
+            return idx
+        if self.source1_cat in (Category.VALUE, Category.CONFIG):
+            return self.source1_spec
+        return 0
 
     @property
     def source2_cat(self) -> int:
-        return self.slots[7]
+        return self.slots[SLOT_SOURCE2_CAT]
+
+    @property
+    def source2_spec(self) -> int:
+        return self.slots[SLOT_SOURCE2_SPEC]
 
     @property
     def source2_type(self) -> int:
-        return self.slots[8]
+        if self.source2_cat in (Category.VARIABLE, Category.CONSTANT):
+            dtype, _ = unpack_type_index(self.source2_spec)
+            return dtype
+        if self.source2_cat == Category.VALUE:
+            return infer_source_type(self.operation, 2)
+        return int(DataType.NONE)
 
     @property
     def source2_value(self) -> int:
-        return self.slots[9]
+        if self.source2_cat in (Category.VARIABLE, Category.CONSTANT):
+            _, idx = unpack_type_index(self.source2_spec)
+            return idx
+        if self.source2_cat in (Category.VALUE, Category.CONFIG):
+            return self.source2_spec
+        return 0
+
+    @property
+    def slot_count(self) -> int:
+        return len(self.slots)
 
     def get_signature(self) -> str:
         """Get unique signature for this instruction"""
@@ -515,7 +693,7 @@ class GFSLInstruction:
 
     def copy(self) -> 'GFSLInstruction':
         """Create deep copy"""
-        return GFSLInstruction(self.slots.copy())
+        return GFSLInstruction(self.slots.copy(), slot_count=len(self.slots))
 
 
 # ============================================================================
@@ -529,6 +707,7 @@ class SlotValidator:
     """
 
     def __init__(self):
+        self.slot_count = DEFAULT_SLOT_COUNT
         self.active_types = {DataType.DECIMAL}  # Start with decimal only
         self.variable_counts = defaultdict(int)  # Track allocated variables
         self.constant_counts = defaultdict(int)  # Track defined constants
@@ -545,47 +724,73 @@ class SlotValidator:
             # Tensor enables neural operations
             self.active_types.add(DataType.TENSOR)
 
+    def _coerce_config_property(self, value: int) -> Optional[ConfigProperty]:
+        try:
+            return ConfigProperty(int(value))
+        except ValueError:
+            return None
+
+    def _alloc_specifiers(self, category: Category, types: List[DataType]) -> List[int]:
+        options: List[int] = []
+        for dtype in types:
+            if category == Category.VARIABLE:
+                count = self.variable_counts[int(dtype)]
+            else:
+                count = self.constant_counts[int(dtype)]
+            for idx in range(count + 1):
+                options.append(pack_type_index(dtype, idx))
+        return options
+
+    def _existing_specifiers(self, category: Category, dtype: DataType) -> List[int]:
+        if category == Category.VARIABLE:
+            count = self.variable_counts[int(dtype)]
+        else:
+            count = self.constant_counts[int(dtype)]
+        if count <= 0:
+            return []
+        return [pack_type_index(dtype, idx) for idx in range(count)]
+
+    def _existing_specifiers_for_types(self, category: Category,
+                                       types: List[DataType]) -> List[int]:
+        options: List[int] = []
+        for dtype in types:
+            options.extend(self._existing_specifiers(category, dtype))
+        return options
+
+    def _value_option_indices(self, op: int,
+                              prop: Optional[ConfigProperty] = None) -> List[int]:
+        enum = ValueEnumerations.get_enumeration((op, prop))
+        return list(range(len(enum))) if enum else []
+
     def get_valid_options(self, instruction: GFSLInstruction, slot_index: int) -> List[int]:
         """Get valid options for a specific slot given all previous slots"""
+        if slot_index >= self.slot_count:
+            return []
 
-        # Slot 0: Target Category
-        if slot_index == 0:
+        if slot_index == SLOT_TARGET_CAT:
             return [Category.NONE, Category.VARIABLE, Category.CONSTANT]
 
-        # Slot 1: Target Type
-        elif slot_index == 1:
-            target_cat = instruction.slots[0]
-            if target_cat == Category.NONE:
-                return [DataType.NONE]
-            elif target_cat == Category.VARIABLE:
-                return list(self.active_types)
-            elif target_cat == Category.CONSTANT:
-                # Only primitives can be constants
-                return [DataType.BOOLEAN, DataType.DECIMAL]
-            return [DataType.NONE]
-
-        # Slot 2: Target Index
-        elif slot_index == 2:
-            target_cat = instruction.slots[0]
-            target_type = instruction.slots[1]
-
+        if slot_index == SLOT_TARGET_SPEC:
+            target_cat = instruction.slots[SLOT_TARGET_CAT]
             if target_cat == Category.NONE:
                 return [0]
-            elif target_cat == Category.VARIABLE:
-                # Existing variables + option to allocate new
-                count = self.variable_counts[target_type]
-                return list(range(count + 1))
-            elif target_cat == Category.CONSTANT:
-                count = self.constant_counts[target_type]
-                return list(range(count + 1))
-            return [0]
+            if target_cat == Category.VARIABLE:
+                return self._alloc_specifiers(Category.VARIABLE, sorted(self.active_types))
+            if target_cat == Category.CONSTANT:
+                return self._alloc_specifiers(
+                    Category.CONSTANT,
+                    [DataType.BOOLEAN, DataType.DECIMAL],
+                )
+            return []
 
-        # Slot 3: Operation
-        elif slot_index == 3:
-            target_cat = instruction.slots[0]
-            target_type = instruction.slots[1]
+        if slot_index == SLOT_OPERATION:
+            target_cat = instruction.slots[SLOT_TARGET_CAT]
+            target_spec = instruction.slots[SLOT_TARGET_SPEC]
+            target_type = int(DataType.NONE)
+            if target_cat in (Category.VARIABLE, Category.CONSTANT):
+                target_type, _ = unpack_type_index(target_spec)
 
-            valid_ops = []
+            valid_ops: List[Operation] = []
             custom_codes: List[int] = []
             try:
                 dtype_enum = DataType(target_type)
@@ -596,197 +801,232 @@ class SlotValidator:
                 custom_codes = custom_operations.codes_for_target(dtype_enum)
 
             if target_cat == Category.NONE:
-                # Control flow operations
-                valid_ops = [Operation.IF, Operation.WHILE, Operation.END,
-                             Operation.SET, Operation.RESULT]
-
+                valid_ops = CONTROL_FLOW_OPS
             elif target_type == DataType.BOOLEAN:
-                # Boolean operations
-                valid_ops = [Operation.GT, Operation.LT, Operation.EQ,
-                             Operation.GTE, Operation.LTE, Operation.NEQ,
-                             Operation.AND, Operation.OR, Operation.NOT]
-
+                valid_ops = BOOLEAN_COMPARE_OPS + BOOLEAN_LOGIC_OPS
             elif target_type == DataType.DECIMAL:
-                # Decimal operations
-                valid_ops = [Operation.ADD, Operation.SUB, Operation.MUL,
-                             Operation.DIV, Operation.POW, Operation.SQRT,
-                             Operation.ABS, Operation.SIN, Operation.COS,
-                             Operation.EXP, Operation.LOG, Operation.MOD]
-
+                valid_ops = DECIMAL_OPS
             elif target_type == DataType.TENSOR:
-                # Tensor operations
-                valid_ops = [Operation.CONV, Operation.LINEAR, Operation.RELU,
-                             Operation.POOL, Operation.NORM, Operation.DROPOUT,
-                             Operation.SOFTMAX, Operation.RESHAPE, Operation.CONCAT]
+                valid_ops = TENSOR_OPS
 
             result_ops = [int(op) for op in valid_ops]
             result_ops.extend(custom_codes)
             return result_ops
 
-        # Slot 4: Source1 Category
-        elif slot_index == 4:
-            op = instruction.slots[3]
+        if slot_index == SLOT_SOURCE1_CAT:
+            op = instruction.slots[SLOT_OPERATION]
             custom_op = custom_operations.get(op)
             if custom_op:
                 allowed = custom_operations.allowed_categories(op, 1)
                 if not allowed:
-                    return [Category.NONE]
+                    return []
                 return [int(cat) for cat in allowed]
 
             if op == Operation.END:
                 return [Category.NONE]
-            elif op == Operation.SET:
-                return [Category.CONFIG]  # Configuration property
-            elif op == Operation.RESULT:
+            if op == Operation.SET:
+                return [Category.CONFIG]
+            if op == Operation.RESULT:
                 return [Category.VARIABLE]
-            elif op in [Operation.IF, Operation.WHILE]:
-                return [Category.VARIABLE, Category.CONSTANT]  # Boolean source
-            elif op in [Operation.NOT, Operation.SQRT, Operation.ABS,
-                        Operation.SIN, Operation.COS, Operation.EXP, Operation.LOG]:
-                # Unary operations
-                return [Category.VARIABLE, Category.CONSTANT, Category.VALUE]
-            else:
-                # Binary operations
-                return [Category.VARIABLE, Category.CONSTANT, Category.VALUE]
+            if op in (Operation.IF, Operation.WHILE):
+                return [Category.VARIABLE, Category.CONSTANT]
+            return [Category.VARIABLE, Category.CONSTANT, Category.VALUE]
 
-        # Slot 5: Source1 Type
-        elif slot_index == 5:
-            source1_cat = instruction.slots[4]
-            op = instruction.slots[3]
+        if slot_index == SLOT_SOURCE1_SPEC:
+            source1_cat = instruction.slots[SLOT_SOURCE1_CAT]
+            op = instruction.slots[SLOT_OPERATION]
             custom_op = custom_operations.get(op)
-
-            if custom_op:
-                if source1_cat == Category.NONE:
-                    return [DataType.NONE]
-                elif source1_cat == Category.CONFIG:
-                    return [0]
-                dtype = custom_operations.source_type(op, 1) or custom_op.target_type
-                if dtype is None:
-                    return [DataType.NONE]
-                return [int(dtype)]
-
-            if source1_cat == Category.NONE:
-                return [DataType.NONE]
-            elif source1_cat == Category.CONFIG:
-                # Config properties don't have types
-                return [0]  # Placeholder
-            elif source1_cat in [Category.VARIABLE, Category.CONSTANT]:
-                # Type depends on operation requirements
-                if op in [Operation.GT, Operation.LT, Operation.EQ,
-                          Operation.GTE, Operation.LTE, Operation.NEQ]:
-                    return [DataType.DECIMAL]
-                elif op in [Operation.AND, Operation.OR, Operation.NOT]:
-                    return [DataType.BOOLEAN]
-                elif op in [Operation.IF, Operation.WHILE]:
-                    return [DataType.BOOLEAN]
-                elif op >= Operation.ADD and op <= Operation.MOD:
-                    return [DataType.DECIMAL]
-                elif op >= Operation.CONV and op <= Operation.CONCAT:
-                    return [DataType.TENSOR]
-
-            elif source1_cat == Category.VALUE:
-                # Inline values - type implicit from operation
-                return [DataType.DECIMAL]  # Most common
-
-            return [DataType.NONE]
-
-        # Slot 6: Source1 Value/Index
-        elif slot_index == 6:
-            source1_cat = instruction.slots[4]
-            source1_type = instruction.slots[5]
-            op = instruction.slots[3]
-
             if source1_cat == Category.NONE:
                 return [0]
-            elif source1_cat == Category.CONFIG:
-                # Configuration properties
+
+            if custom_op:
+                if source1_cat == Category.CONFIG:
+                    return [int(p) for p in ConfigProperty]
+                if source1_cat == Category.VALUE:
+                    return self._value_option_indices(op)
+                dtype = custom_operations.source_type(op, 1) or custom_op.target_type
+                if dtype is None:
+                    return []
+                return self._existing_specifiers(source1_cat, dtype)
+
+            if source1_cat == Category.CONFIG:
                 if op == Operation.SET:
                     return [int(p) for p in ConfigProperty]
-            elif source1_cat == Category.VARIABLE:
-                count = self.variable_counts[source1_type]
-                return list(range(count)) if count > 0 else [0]
-            elif source1_cat == Category.CONSTANT:
-                count = self.constant_counts[source1_type]
-                return list(range(count)) if count > 0 else [0]
-            elif source1_cat == Category.VALUE:
-                # Index into context-specific enumeration
-                context = (op, None)
-                enum = ValueEnumerations.get_enumeration(context)
-                return list(range(len(enum)))
+                return []
 
-            return [0]
+            if source1_cat in (Category.VARIABLE, Category.CONSTANT):
+                if op == Operation.RESULT:
+                    return self._existing_specifiers_for_types(
+                        source1_cat,
+                        sorted(self.active_types),
+                    )
+                dtype = infer_source_type(op, 1)
+                if dtype == int(DataType.NONE):
+                    return []
+                return self._existing_specifiers(source1_cat, DataType(dtype))
 
-        # Slots 7-9: Source2 (similar logic to Source1)
-        elif slot_index == 7:
-            op = instruction.slots[3]
+            if source1_cat == Category.VALUE:
+                return self._value_option_indices(op)
+
+            return []
+
+        if slot_index == SLOT_SOURCE2_CAT:
+            op = instruction.slots[SLOT_OPERATION]
             custom_op = custom_operations.get(op)
             if custom_op:
                 if custom_operations.arity(op) < 2:
                     return [Category.NONE]
                 allowed = custom_operations.allowed_categories(op, 2)
                 if not allowed:
-                    return [Category.NONE]
+                    return []
                 return [int(cat) for cat in allowed]
-            # Check if operation is binary
-            if op in [Operation.ADD, Operation.SUB, Operation.MUL, Operation.DIV,
-                      Operation.POW, Operation.MOD, Operation.AND, Operation.OR,
-                      Operation.GT, Operation.LT, Operation.EQ, Operation.GTE,
-                      Operation.LTE, Operation.NEQ]:
-                return [Category.VARIABLE, Category.CONSTANT, Category.VALUE]
-            else:
-                return [Category.NONE]
 
-        elif slot_index == 8:
-            source2_cat = instruction.slots[7]
-            op = instruction.slots[3]
+            if op == Operation.SET:
+                return [Category.VALUE]
+            if op in BINARY_OPS:
+                return [Category.VARIABLE, Category.CONSTANT, Category.VALUE]
+            return [Category.NONE]
+
+        if slot_index == SLOT_SOURCE2_SPEC:
+            source2_cat = instruction.slots[SLOT_SOURCE2_CAT]
+            op = instruction.slots[SLOT_OPERATION]
             custom_op = custom_operations.get(op)
+            if source2_cat == Category.NONE:
+                return [0]
+
             if custom_op:
-                if source2_cat == Category.NONE:
-                    return [DataType.NONE]
-                elif source2_cat == Category.CONFIG:
-                    return [0]
+                if source2_cat == Category.CONFIG:
+                    return [int(p) for p in ConfigProperty]
+                if source2_cat == Category.VALUE:
+                    return self._value_option_indices(op)
                 dtype = custom_operations.source_type(op, 2) or custom_op.target_type
                 if dtype is None:
-                    return [DataType.NONE]
-                return [int(dtype)]
-            if source2_cat == Category.NONE:
-                return [DataType.NONE]
-            # Similar logic to source1_type
-            return self.get_valid_options(instruction, 5)  # Reuse source1 logic
+                    return []
+                return self._existing_specifiers(source2_cat, dtype)
 
-        elif slot_index == 9:
-            source2_cat = instruction.slots[7]
-            op = instruction.slots[3]
-            custom_op = custom_operations.get(op)
-            if custom_op:
-                if source2_cat == Category.NONE:
-                    return [0]
-                elif source2_cat == Category.CONFIG:
-                    return [0]
-                elif source2_cat == Category.VARIABLE:
-                    dtype = custom_operations.source_type(op, 2) or custom_op.target_type
-                    dtype_idx = int(dtype) if dtype is not None else 0
-                    count = self.variable_counts[dtype_idx]
-                    return list(range(count)) if count > 0 else [0]
-                elif source2_cat == Category.CONSTANT:
-                    dtype = custom_operations.source_type(op, 2) or custom_op.target_type
-                    dtype_idx = int(dtype) if dtype is not None else 0
-                    count = self.constant_counts[dtype_idx]
-                    return list(range(count)) if count > 0 else [0]
-                elif source2_cat == Category.VALUE:
-                    options = custom_operations.value_options(op)
-                    if options is not None and len(options) > 0:
-                        return list(range(len(options)))
-                    context = (op, None)
-                    enum = ValueEnumerations.get_enumeration(context)
-                    return list(range(len(enum))) if enum else [0]
-                return [0]
-            if source2_cat == Category.NONE:
-                return [0]
-            # Similar logic to source1_value
-            return self.get_valid_options(instruction, 6)  # Reuse source1 logic
+            if source2_cat == Category.CONFIG:
+                if op == Operation.SET:
+                    return [int(p) for p in ConfigProperty]
+                return []
 
-        return [0]
+            if source2_cat in (Category.VARIABLE, Category.CONSTANT):
+                dtype = infer_source_type(op, 2)
+                if dtype == int(DataType.NONE):
+                    return []
+                return self._existing_specifiers(source2_cat, DataType(dtype))
+
+            if source2_cat == Category.VALUE:
+                prop = None
+                if op == Operation.SET and instruction.slots[SLOT_SOURCE1_CAT] == Category.CONFIG:
+                    prop = self._coerce_config_property(instruction.slots[SLOT_SOURCE1_SPEC])
+                return self._value_option_indices(op, prop)
+
+            return []
+
+        return []
+
+    def _prob_state_key(self, instruction: GFSLInstruction, slot_index: int) -> Tuple[int, Tuple[int, ...]]:
+        return slot_index, tuple(instruction.slots[:slot_index])
+
+    def _completion_probability(self, instruction: GFSLInstruction, slot_index: int,
+                                cache: Dict[Tuple[int, Tuple[int, ...]], float],
+                                max_branching: int) -> float:
+        if slot_index >= self.slot_count:
+            return 1.0
+        state_key = self._prob_state_key(instruction, slot_index)
+        if state_key in cache:
+            return cache[state_key]
+
+        options = self.get_valid_options(instruction, slot_index)
+        if not options:
+            cache[state_key] = 0.0
+            return 0.0
+        if len(options) > max_branching:
+            options = options[:max_branching]
+
+        total = 0.0
+        prior_value = instruction.slots[slot_index]
+        for opt in options:
+            instruction.slots[slot_index] = opt
+            total += self._completion_probability(instruction, slot_index + 1, cache, max_branching)
+        instruction.slots[slot_index] = prior_value
+
+        probability = total / len(options)
+        cache[state_key] = probability
+        return probability
+
+    def option_success_probabilities(self, instruction: GFSLInstruction, slot_index: int,
+                                     max_branching: int = DEFAULT_PROBABILITY_BRANCHING) -> Dict[int, float]:
+        """Return probability of completing an instruction for each slot option."""
+        options = self.get_valid_options(instruction, slot_index)
+        if not options:
+            return {}
+        cache: Dict[Tuple[int, Tuple[int, ...]], float] = {}
+        probabilities: Dict[int, float] = {}
+        prior_value = instruction.slots[slot_index]
+        for opt in options:
+            instruction.slots[slot_index] = opt
+            probabilities[opt] = self._completion_probability(
+                instruction,
+                slot_index + 1,
+                cache,
+                max_branching,
+            )
+        instruction.slots[slot_index] = prior_value
+        return probabilities
+
+    def viable_options(self, instruction: GFSLInstruction, slot_index: int,
+                       max_branching: int = DEFAULT_PROBABILITY_BRANCHING) -> Tuple[List[int], Dict[int, float]]:
+        """Return options that can still lead to a valid completion."""
+        probabilities = self.option_success_probabilities(instruction, slot_index, max_branching)
+        viable = [opt for opt, prob in probabilities.items() if prob > 0.0]
+        return viable, probabilities
+
+    def choose_option(self, instruction: GFSLInstruction, slot_index: int,
+                      max_branching: int = DEFAULT_PROBABILITY_BRANCHING) -> int:
+        """Choose a slot option biased toward successful completion."""
+        valid_options = self.get_valid_options(instruction, slot_index)
+        if not valid_options:
+            raise ValueError(f"No valid options for slot {slot_index}.")
+        if len(valid_options) == 1:
+            return valid_options[0]
+
+        viable, probabilities = self.viable_options(instruction, slot_index, max_branching)
+        candidates = viable or valid_options
+
+        weights = [probabilities.get(opt, 0.0) for opt in candidates]
+        if viable and sum(weights) > 0:
+            return random.choices(candidates, weights=weights, k=1)[0]
+        return random.choice(candidates)
+
+    def build_probability_tree(self, instruction: GFSLInstruction, slot_index: int = 0,
+                               max_branching: int = 32) -> Dict[int, Dict[str, Any]]:
+        """Return a bounded probability tree for instruction completion."""
+        if slot_index >= self.slot_count:
+            return {}
+        options = self.get_valid_options(instruction, slot_index)
+        if len(options) > max_branching:
+            options = options[:max_branching]
+
+        cache: Dict[Tuple[int, Tuple[int, ...]], float] = {}
+        prior_value = instruction.slots[slot_index]
+        tree: Dict[int, Dict[str, Any]] = {}
+        for opt in options:
+            instruction.slots[slot_index] = opt
+            probability = self._completion_probability(
+                instruction,
+                slot_index + 1,
+                cache,
+                max_branching,
+            )
+            children = self.build_probability_tree(
+                instruction,
+                slot_index + 1,
+                max_branching,
+            )
+            tree[opt] = {"probability": probability, "children": children}
+        instruction.slots[slot_index] = prior_value
+        return tree
 
     def update_state(self, instruction: GFSLInstruction):
         """Update validator state after instruction is added"""
@@ -811,12 +1051,13 @@ class SlotValidator:
 
         # Handle SET operations
         if op == Operation.SET:
-            prop = instruction.source1_value
+            prop_value = instruction.source1_value
+            prop = self._coerce_config_property(prop_value)
             value_idx = instruction.source2_value
             context = (op, prop)
             enum = ValueEnumerations.get_enumeration(context)
             if value_idx < len(enum):
-                self.config_state[prop] = enum[value_idx]
+                self.config_state[prop_value] = enum[value_idx]
 
 
 # ============================================================================
@@ -839,33 +1080,39 @@ class GFSLGenome:
         self._signature: Optional[str] = None
         self._effective_instructions: Optional[List[int]] = None
 
-    def add_instruction_interactive(self) -> GFSLInstruction:
+    def add_instruction_interactive(self, max_attempts: int = 25) -> GFSLInstruction:
         """
         Build instruction slot-by-slot with cascading validity.
         This is the key method for Q-learning integration.
         """
-        instruction = GFSLInstruction()
+        last_error: Optional[Exception] = None
+        for _ in range(max_attempts):
+            instruction = GFSLInstruction(slot_count=self.validator.slot_count)
+            try:
+                for slot_idx in range(self.validator.slot_count):
+                    instruction.slots[slot_idx] = self.validator.choose_option(instruction, slot_idx)
+            except ValueError as exc:
+                last_error = exc
+                continue
 
-        for slot_idx in range(10):
-            valid_options = self.validator.get_valid_options(instruction, slot_idx)
-            if not valid_options:
-                valid_options = [0]
+            self.instructions.append(instruction)
+            self.validator.update_state(instruction)
+            self._signature = None
+            self._effective_instructions = None
 
-            # For now, random selection (Q-learning would choose here)
-            instruction.slots[slot_idx] = random.choice(valid_options)
+            return instruction
 
-        self.instructions.append(instruction)
-        self.validator.update_state(instruction)
-        self._signature = None
-        self._effective_instructions = None
-
-        return instruction
+        raise RuntimeError(
+            f"Unable to build a valid instruction after {max_attempts} attempts."
+        ) from last_error
 
     def add_instruction(self, instruction: GFSLInstruction) -> bool:
         """Add a complete instruction with validation"""
+        if len(instruction.slots) != self.validator.slot_count:
+            return False
         # Validate each slot against current state
-        test_instr = GFSLInstruction()
-        for slot_idx in range(10):
+        test_instr = GFSLInstruction(slot_count=self.validator.slot_count)
+        for slot_idx in range(self.validator.slot_count):
             valid_options = self.validator.get_valid_options(test_instr, slot_idx)
             if instruction.slots[slot_idx] not in valid_options:
                 return False
@@ -1009,6 +1256,12 @@ class GFSLGenome:
         elif cat == Category.VALUE:
             # Get actual value from enumeration
             context = (instr.operation, None)
+            if instr.operation == Operation.SET and source_num == 2 and instr.source1_cat == Category.CONFIG:
+                try:
+                    prop = ConfigProperty(instr.source1_value)
+                except ValueError:
+                    prop = None
+                context = (instr.operation, prop)
             enum = ValueEnumerations.get_enumeration(context)
             if val < len(enum):
                 return str(enum[val])
@@ -1226,6 +1479,12 @@ class GFSLExecutor:
             return self.constants[dtype][val]
         elif cat == Category.VALUE:
             context = (instr.operation, None)
+            if instr.operation == Operation.SET and source_num == 2 and instr.source1_cat == Category.CONFIG:
+                try:
+                    prop = ConfigProperty(instr.source1_value)
+                except ValueError:
+                    prop = None
+                context = (instr.operation, prop)
             enum = ValueEnumerations.get_enumeration(context)
             if val < len(enum):
                 return enum[val]
@@ -1494,7 +1753,10 @@ class GFSLEvolver:
 
             # Add random instructions
             for _ in range(random.randint(1, initial_instructions)):
-                genome.add_instruction_interactive()
+                try:
+                    genome.add_instruction_interactive()
+                except RuntimeError:
+                    break
 
             # Add to population if unique
             sig = genome.get_signature()
@@ -1512,7 +1774,7 @@ class GFSLEvolver:
         if mutation_type == 'slot' and mutated.instructions:
             # Mutate a random slot in a random instruction
             instr_idx = random.randint(0, len(mutated.instructions) - 1)
-            slot_idx = random.randint(0, 9)
+            slot_idx = random.randint(0, mutated.validator.slot_count - 1)
 
             # Get valid options for this slot
             test_instr = mutated.instructions[instr_idx].copy()
@@ -1526,7 +1788,7 @@ class GFSLEvolver:
                     mutated.instructions[instr_idx].slots[slot_idx] = random.choice(other_options)
 
                     # Cascade updates to dependent slots
-                    for next_slot in range(slot_idx + 1, 10):
+                    for next_slot in range(slot_idx + 1, mutated.validator.slot_count):
                         next_valid = mutated.validator.get_valid_options(
                             mutated.instructions[instr_idx], next_slot)
                         if next_valid:
@@ -1692,23 +1954,35 @@ class GFSLQLearningGuide:
         best_actions = [a for a, q in valid_q.items() if q == max_q]
         return random.choice(best_actions)
 
-    def build_instruction(self, validator: SlotValidator) -> GFSLInstruction:
-        """Build instruction using Q-learning guidance"""
-        instruction = GFSLInstruction()
-        states_actions = []
+    def build_instruction(self, validator: SlotValidator,
+                          max_attempts: int = 25) -> Tuple[GFSLInstruction, List[Tuple[str, int]]]:
+        """Build instruction using Q-learning guidance."""
+        last_error: Optional[Exception] = None
+        for _ in range(max_attempts):
+            instruction = GFSLInstruction(slot_count=validator.slot_count)
+            states_actions: List[Tuple[str, int]] = []
+            try:
+                for slot_idx in range(validator.slot_count):
+                    valid_options = validator.get_valid_options(instruction, slot_idx)
+                    if not valid_options:
+                        raise ValueError(f"No valid options for slot {slot_idx}.")
 
-        for slot_idx in range(10):
-            valid_options = validator.get_valid_options(instruction, slot_idx)
-            if not valid_options:
-                valid_options = [0]
+                    viable, _ = validator.viable_options(instruction, slot_idx)
+                    action_space = viable or valid_options
 
-            state_key = self.get_state_key(instruction, slot_idx)
-            action = self.choose_action(instruction, slot_idx, valid_options)
+                    state_key = self.get_state_key(instruction, slot_idx)
+                    action = self.choose_action(instruction, slot_idx, action_space)
 
-            instruction.slots[slot_idx] = action
-            states_actions.append((state_key, action))
+                    instruction.slots[slot_idx] = action
+                    states_actions.append((state_key, action))
+                return instruction, states_actions
+            except ValueError as exc:
+                last_error = exc
+                continue
 
-        return instruction, states_actions
+        raise RuntimeError(
+            f"Unable to build a valid instruction after {max_attempts} attempts."
+        ) from last_error
 
     def update_from_fitness(self, states_actions: List[Tuple[str, int]],
                             fitness: float):
@@ -2105,35 +2379,35 @@ def example_neural_architecture_search():
     genome.validator.activate_type(DataType.TENSOR)
 
     # Build a simple CNN using GFSL instructions
-    # SET CHANNELS = 32
+    # SET CHANNELS = 64
     set_channels = GFSLInstruction([
-        Category.NONE, DataType.NONE, 0, Operation.SET,
-        Category.CONFIG, 0, ConfigProperty.CHANNELS,
-        Category.VALUE, DataType.DECIMAL, 5  # Index 5 -> 64 channels
+        Category.NONE, 0, Operation.SET,
+        Category.CONFIG, ConfigProperty.CHANNELS,
+        Category.VALUE, 5  # Index 5 -> 64 channels
     ])
     genome.add_instruction(set_channels)
 
     # SET KERNEL = 3
     set_kernel = GFSLInstruction([
-        Category.NONE, DataType.NONE, 0, Operation.SET,
-        Category.CONFIG, 0, ConfigProperty.KERNEL,
-        Category.VALUE, DataType.DECIMAL, 1  # Index 1 -> kernel size 3
+        Category.NONE, 0, Operation.SET,
+        Category.CONFIG, ConfigProperty.KERNEL,
+        Category.VALUE, 1  # Index 1 -> kernel size 3
     ])
     genome.add_instruction(set_kernel)
 
     # t$0 = CONV(t$0)
     conv = GFSLInstruction([
-        Category.VARIABLE, DataType.TENSOR, 0, Operation.CONV,
-        Category.VARIABLE, DataType.TENSOR, 0,
-        Category.NONE, DataType.NONE, 0
+        Category.VARIABLE, pack_type_index(DataType.TENSOR, 0), Operation.CONV,
+        Category.VARIABLE, pack_type_index(DataType.TENSOR, 0),
+        Category.NONE, 0
     ])
     genome.add_instruction(conv)
 
     # t$0 = RELU(t$0)
     relu = GFSLInstruction([
-        Category.VARIABLE, DataType.TENSOR, 0, Operation.RELU,
-        Category.VARIABLE, DataType.TENSOR, 0,
-        Category.NONE, DataType.NONE, 0
+        Category.VARIABLE, pack_type_index(DataType.TENSOR, 0), Operation.RELU,
+        Category.VARIABLE, pack_type_index(DataType.TENSOR, 0),
+        Category.NONE, 0
     ])
     genome.add_instruction(relu)
 

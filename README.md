@@ -2,7 +2,7 @@
 
 GFSL-aligned evolutionary search engine with supervised PyTorch guidance.
 
-The project reimplements the **Genetic Fixed Structure Language (GFSL)** as described in the “GFSL Basic” and “GFSL Extensibility” papers. Evolvo keeps the strictly numeric, 10-slot instruction encoding while extending the framework with learning-based direction models that bias evolution toward higher-fitness regions.
+The project reimplements the **Genetic Fixed Structure Language (GFSL)** as described in the “GFSL Basic” and “GFSL Extensibility” papers. Evolvo keeps the strictly numeric, 7-slot compressed instruction encoding while extending the framework with learning-based direction models that bias evolution toward higher-fitness regions.
 
 > 📄 The original specifications live in [`papers/`](papers); start with [`GFSL-definition.md`](papers/GFSL-definition.md).
 
@@ -10,7 +10,7 @@ The project reimplements the **Genetic Fixed Structure Language (GFSL)** as desc
 
 ## Highlights
 
-- **Fixed 10-slot genome language** that guarantees every instruction is valid by construction.
+- **Fixed 7-slot compressed genome language** that guarantees every instruction is valid by construction.
 - **Cascading slot validator** with progressive type activation (decimal → boolean → tensor) and context-aware enumerations.
 - **Effective algorithm extraction** so execution only touches the instructions that matter.
 - **Neural architecture support** via `RecursiveModelBuilder`, enabling GFSL to describe CNN/MLP topologies.
@@ -170,7 +170,7 @@ print(executor.execute(best, {"d$0": 3.0}))
 import torch
 from evolvo import (
     Category, ConfigProperty, DataType, GFSLGenome,
-    GFSLInstruction, Operation, RecursiveModelBuilder
+    GFSLInstruction, Operation, RecursiveModelBuilder, pack_type_index
 )
 
 genome = GFSLGenome("neural")
@@ -178,21 +178,21 @@ genome.validator.activate_type(DataType.TENSOR)
 
 # SET CHANNELS = 64
 genome.add_instruction(GFSLInstruction([
-    Category.NONE, DataType.NONE, 0, Operation.SET,
-    Category.CONFIG, 0, ConfigProperty.CHANNELS,
-    Category.VALUE, DataType.DECIMAL, 5,
+    Category.NONE, 0, Operation.SET,
+    Category.CONFIG, ConfigProperty.CHANNELS,
+    Category.VALUE, 5,
 ]))
 
 # t$0 = CONV(t$0) followed by RELU
 genome.add_instruction(GFSLInstruction([
-    Category.VARIABLE, DataType.TENSOR, 0, Operation.CONV,
-    Category.VARIABLE, DataType.TENSOR, 0,
-    Category.NONE, DataType.NONE, 0,
+    Category.VARIABLE, pack_type_index(DataType.TENSOR, 0), Operation.CONV,
+    Category.VARIABLE, pack_type_index(DataType.TENSOR, 0),
+    Category.NONE, 0,
 ]))
 genome.add_instruction(GFSLInstruction([
-    Category.VARIABLE, DataType.TENSOR, 0, Operation.RELU,
-    Category.VARIABLE, DataType.TENSOR, 0,
-    Category.NONE, DataType.NONE, 0,
+    Category.VARIABLE, pack_type_index(DataType.TENSOR, 0), Operation.RELU,
+    Category.VARIABLE, pack_type_index(DataType.TENSOR, 0),
+    Category.NONE, 0,
 ]))
 
 builder = RecursiveModelBuilder()
@@ -209,7 +209,7 @@ Use `register_custom_operation` when you need a one-off opcode without editing t
 ```python
 from evolvo import (
     Category, DataType, GFSLExecutor,
-    GFSLGenome, GFSLInstruction, register_custom_operation,
+    GFSLGenome, GFSLInstruction, pack_type_index, register_custom_operation,
 )
 
 opcode = register_custom_operation(
@@ -223,9 +223,9 @@ opcode = register_custom_operation(
 
 genome = GFSLGenome("algorithm")
 genome.add_instruction(GFSLInstruction([
-    Category.VARIABLE, DataType.DECIMAL, 1, opcode,
-    Category.VARIABLE, DataType.DECIMAL, 0,
-    Category.VALUE, DataType.DECIMAL, 3,  # chooses bias=2.0
+    Category.VARIABLE, pack_type_index(DataType.DECIMAL, 1), opcode,
+    Category.VARIABLE, pack_type_index(DataType.DECIMAL, 0),
+    Category.VALUE, 3,  # chooses bias=2.0
 ]))
 genome.mark_output(DataType.DECIMAL, 1)
 

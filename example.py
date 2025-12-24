@@ -16,6 +16,7 @@ from evolvo import (
     GFSLEvolver,
     GFSLSupervisedGuide,
     RealTimeEvaluator,
+    pack_type_index,
     register_custom_operation,
 )
 
@@ -51,14 +52,11 @@ def personalization_demo() -> None:
     instruction = GFSLInstruction(
         [
             Category.VARIABLE,
-            DataType.DECIMAL,
-            1,
+            pack_type_index(DataType.DECIMAL, 1),
             opcode,
             Category.VARIABLE,
-            DataType.DECIMAL,
-            0,
+            pack_type_index(DataType.DECIMAL, 0),
             Category.VALUE,
-            DataType.DECIMAL,
             3,  # Uses the inline value 2.0 as the bias term
         ]
     )
