@@ -765,61 +765,61 @@ class SlotOption:
         return data
 
 
-    def describe_slot_option(instruction: GFSLInstruction, slot_index: int, value: int) -> str:
-        """Return a readable label for a slot value given the current instruction."""
-        if slot_index in (SLOT_TARGET_CAT, SLOT_SOURCE1_CAT, SLOT_SOURCE2_CAT):
+def describe_slot_option(instruction: GFSLInstruction, slot_index: int, value: int) -> str:
+    """Return a readable label for a slot value given the current instruction."""
+    if slot_index in (SLOT_TARGET_CAT, SLOT_SOURCE1_CAT, SLOT_SOURCE2_CAT):
+        try:
+            return Category(value).name
+        except ValueError:
+            return f"CATEGORY[{value}]"
+
+    if slot_index == SLOT_OPERATION:
+        return resolve_operation_name(int(value))
+
+    if slot_index in (SLOT_TARGET_SPEC, SLOT_SOURCE1_SPEC, SLOT_SOURCE2_SPEC):
+        if slot_index == SLOT_TARGET_SPEC:
+            cat_value = instruction.slot_value(SLOT_TARGET_CAT)
+        elif slot_index == SLOT_SOURCE1_SPEC:
+            cat_value = instruction.slot_value(SLOT_SOURCE1_CAT)
+        else:
+            cat_value = instruction.slot_value(SLOT_SOURCE2_CAT)
+
+        try:
+            cat = Category(cat_value)
+        except ValueError:
+            return f"SPEC[{value}]"
+
+        if cat == Category.NONE:
+            return "NONE"
+        if cat in (Category.VARIABLE, Category.CONSTANT):
+            dtype, idx = unpack_type_index(value)
             try:
-                return Category(value).name
+                dtype_enum = DataType(dtype)
+                prefix = dtype_enum.name[0].lower()
             except ValueError:
-                return f"CATEGORY[{value}]"
-
-        if slot_index == SLOT_OPERATION:
-            return resolve_operation_name(int(value))
-
-        if slot_index in (SLOT_TARGET_SPEC, SLOT_SOURCE1_SPEC, SLOT_SOURCE2_SPEC):
-            if slot_index == SLOT_TARGET_SPEC:
-                cat_value = instruction.slot_value(SLOT_TARGET_CAT)
-            elif slot_index == SLOT_SOURCE1_SPEC:
-                cat_value = instruction.slot_value(SLOT_SOURCE1_CAT)
-            else:
-                cat_value = instruction.slot_value(SLOT_SOURCE2_CAT)
-
+                prefix = f"type{dtype}"
+            symbol = "$" if cat == Category.VARIABLE else "#"
+            return f"{prefix}{symbol}{idx}"
+        if cat == Category.CONFIG:
             try:
-                cat = Category(cat_value)
+                return ConfigProperty(value).name
             except ValueError:
-                return f"SPEC[{value}]"
+                return f"CONFIG[{value}]"
+        if cat == Category.VALUE:
+            op = instruction.slot_value(SLOT_OPERATION)
+            prop = None
+            if slot_index == SLOT_SOURCE2_SPEC and op == Operation.SET:
+                if instruction.slot_value(SLOT_SOURCE1_CAT) == Category.CONFIG:
+                    try:
+                        prop = ConfigProperty(instruction.slot_value(SLOT_SOURCE1_SPEC))
+                    except ValueError:
+                        prop = None
+            enum = ValueEnumerations.get_enumeration((op, prop))
+            if value < len(enum):
+                return str(enum[value])
+            return f"VAL[{value}]"
 
-            if cat == Category.NONE:
-                return "NONE"
-            if cat in (Category.VARIABLE, Category.CONSTANT):
-                dtype, idx = unpack_type_index(value)
-                try:
-                    dtype_enum = DataType(dtype)
-                    prefix = dtype_enum.name[0].lower()
-                except ValueError:
-                    prefix = f"type{dtype}"
-                symbol = "$" if cat == Category.VARIABLE else "#"
-                return f"{prefix}{symbol}{idx}"
-            if cat == Category.CONFIG:
-                try:
-                    return ConfigProperty(value).name
-                except ValueError:
-                    return f"CONFIG[{value}]"
-            if cat == Category.VALUE:
-                op = instruction.slot_value(SLOT_OPERATION)
-                prop = None
-                if slot_index == SLOT_SOURCE2_SPEC and op == Operation.SET:
-                    if instruction.slot_value(SLOT_SOURCE1_CAT) == Category.CONFIG:
-                        try:
-                            prop = ConfigProperty(instruction.slot_value(SLOT_SOURCE1_SPEC))
-                        except ValueError:
-                            prop = None
-                enum = ValueEnumerations.get_enumeration((op, prop))
-                if value < len(enum):
-                    return str(enum[value])
-                return f"VAL[{value}]"
-
-        return str(value)
+    return str(value)
 
 
 # ============================================================================
