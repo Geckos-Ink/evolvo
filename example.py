@@ -60,6 +60,8 @@ def personalization_demo() -> None:
     )
 
     genome = GFSLGenome("algorithm")
+    # Make d$0 available as an input slot without assigning it first.
+    genome.validator.variable_counts[int(DataType.DECIMAL)] = 1
     instruction = GFSLInstruction(
         [
             Category.VARIABLE,
