@@ -1,7 +1,18 @@
-"""Example workflow demonstrating GFSL evolution with the supervised guide."""
+"""
+Example workflow demonstrating GFSL evolution with the supervised guide.
+
+Usage:
+  python example.py
+  python example.py personalization
+  python example.py both
+  python example.py expression
+  python example.py neural
+"""
 
 import random
+import runpy
 import sys
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -75,6 +86,28 @@ def personalization_demo() -> None:
         print(" ", line)
 
 
+def print_usage() -> None:
+    print(
+        "Usage: python example.py [mode]\n"
+        "  evolution (default)  Run the supervised evolution demo\n"
+        "  personalization      Run the custom-operation demo\n"
+        "  both                 Run personalization then evolution\n"
+        "  expression           Run examples/expression_flow.py\n"
+        "  neural               Run examples/neural_flow.py\n"
+        "\n"
+        "You can also run the scripts directly:\n"
+        "  python examples/expression_flow.py\n"
+        "  python examples/neural_flow.py\n"
+    )
+
+
+def run_example_script(filename: str) -> None:
+    script_path = Path(__file__).resolve().parent / "examples" / filename
+    if not script_path.exists():
+        raise FileNotFoundError(f"Example script not found: {script_path}")
+    runpy.run_path(str(script_path), run_name="__main__")
+
+
 def main():
     random.seed(42)
     np.random.seed(42)
@@ -136,10 +169,20 @@ def main():
 
 if __name__ == "__main__":
     mode = sys.argv[1].lower() if len(sys.argv) > 1 else "evolution"
+    if mode in {"-h", "--help", "help", "examples"}:
+        print_usage()
+        raise SystemExit(0)
     if mode == "personalization":
         personalization_demo()
     elif mode == "both":
         personalization_demo()
         main()
-    else:
+    elif mode in {"expression", "expression_flow"}:
+        run_example_script("expression_flow.py")
+    elif mode in {"neural", "neural_flow"}:
+        run_example_script("neural_flow.py")
+    elif mode == "evolution":
         main()
+    else:
+        print_usage()
+        raise SystemExit(1)

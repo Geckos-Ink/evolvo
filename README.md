@@ -101,6 +101,15 @@ print(best.to_human_readable())
 
 ---
 
+## Additional Examples
+
+Practical scripts live in `examples/`:
+
+- `examples/expression_flow.py` — slot-wise builder flow, option previews, and conditional consequents.
+- `examples/neural_flow.py` — SET/CONV neural flow with a consequent RELU.
+
+---
+
 ## Library Tour
 
 ### GFSL Core
