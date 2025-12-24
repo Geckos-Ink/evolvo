@@ -13,6 +13,7 @@ The project reimplements the **Genetic Fixed Structure Language (GFSL)** as desc
 - **Fixed compressed genome language** (default 7 slots, auto-sized to max expression length) that guarantees every instruction is valid by construction.
 - **Cascading slot validator** with progressive type activation (decimal → boolean → tensor) and context-aware enumerations.
 - **Effective algorithm extraction** so execution only touches the instructions that matter.
+- **Targeted operation extraction** to pull only the dependencies for specific result references.
 - **Neural architecture support** via `RecursiveModelBuilder`, enabling GFSL to describe CNN/MLP topologies.
 - **Hybrid guidance**:
   - `GFSLQLearningGuide` learns slot choices with tabular Q-learning.
@@ -107,6 +108,7 @@ Practical scripts live in `examples/`:
 
 - `examples/expression_flow.py` — slot-wise builder flow, option previews, and conditional consequents.
 - `examples/neural_flow.py` — SET/CONV neural flow with a consequent RELU.
+- `examples/operation_extraction.py` — dependency-based extraction for specific result references.
 
 ---
 
@@ -119,7 +121,7 @@ Practical scripts live in `examples/`:
 | `GFSLInstruction` | 10-integer representation of each instruction. |
 | `SlotValidator` | Enforces cascading slot validity and tracks active variables/constants. |
 | `ValueEnumerations` | Operation- and config-specific lookup tables for numeric slots. |
-| `GFSLGenome` | Holds instructions, output declarations, signatures, and effective-instruction extraction. |
+| `GFSLGenome` | Holds instructions, output declarations, signatures, and operation/effective extraction helpers. |
 | `GFSLExecutor` | Executes only the effective instructions while supporting injected inputs. |
 
 ### Evaluation & Search
@@ -139,6 +141,39 @@ Practical scripts live in `examples/`:
   - Biases mutation by sampling several candidate offspring and choosing the one with the best predicted fitness.
 
 Both approaches respect GFSL’s fixed-slot constraints; the supervised guide simply tilts the mutation operator toward more promising instruction combinations.
+
+---
+
+## Operation Extraction
+
+Use the extraction helpers to get only the minimal operations needed for one or more result references.
+You can keep the original execution order, or choose a fixed slot ordering to obtain a stable,
+enumerator-ordered signature for the same operation set.
+
+```python
+from evolvo import DataType, GFSLGenome
+
+genome = GFSLGenome("algorithm")
+# ... build instructions ...
+
+# Extract by explicit references (string, tuple, or dict forms).
+indices = genome.extract_operation_indices(["d$3", (DataType.DECIMAL, 4)], order="fixed")
+instructions = genome.extract_operations(["d$3"], order="execution")
+
+# If no result refs are provided, outputs are used by default.
+genome.mark_output(DataType.DECIMAL, 3)
+indices = genome.extract_operation_indices(order="fixed")
+```
+
+Result reference forms:
+- `"d$3"` or `"b#0"`
+- `(DataType.DECIMAL, 3)` or `(Category.VARIABLE, DataType.DECIMAL, 3)`
+- `{"category": Category.VARIABLE, "dtype": DataType.DECIMAL, "index": 3}`
+
+Ordering options:
+- `"execution"`: original instruction index order.
+- `"fixed"`: stable sort by slot values (enumerator order).
+- `"topological"`: dependency order with a fixed tie-break by slot values.
 
 ---
 
