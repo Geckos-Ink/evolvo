@@ -2,8 +2,25 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
-import torch
+
+_TORCH_IMPORT_ERROR: Optional[ImportError] = None
+try:
+    import torch
+except ImportError as exc:
+    torch = None  # type: ignore[assignment]
+    _TORCH_IMPORT_ERROR = exc
+else:
+    _TORCH_IMPORT_ERROR = None
+
+
+def _require_torch(feature: str) -> None:
+    if torch is None:
+        raise ModuleNotFoundError(
+            f"`torch` is required for {feature}. Install it via `pip install torch`."
+        ) from _TORCH_IMPORT_ERROR
 
 from .enums import Category, ConfigProperty, DataType, Operation
 from .executor import GFSLExecutor
@@ -68,6 +85,7 @@ def example_formula_discovery():
 
 def example_neural_architecture_search():
     """Example: Evolve neural network architecture."""
+    _require_torch("example_neural_architecture_search")
     print("\n=== GFSL Neural Architecture Search ===\n")
 
     builder = RecursiveModelBuilder()

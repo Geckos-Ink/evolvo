@@ -31,6 +31,9 @@ Quick guidance for AI assistants working in this repository.
 - `custom_operations` is a global registry; `ValueEnumerations` consults it for custom value enumerations.
 - `src/evolvo/__init__.py` re-exports the public API; prefer `from evolvo import ...`.
 
+## Optional dependencies
+- `torch` (including `torch.nn`, `torch.nn.functional`, and `torch.optim`) is optional. The supervised guidance stack (`src/evolvo/supervised.py`), the neural model builder (`src/evolvo/model.py`), GPU-aware demos, and the provided example scripts now raise informative errors when PyTorch is missing so the rest of the library can be imported with only NumPy installed.
+
 ## GFSL slot semantics and validity
 - Instruction layout: fixed per genome, default is 7 slots (2-slot address + op + 2-slot address + 2-slot address), auto-sized to the maximum declared expression length.
 - Slot order: target_cat, target_spec, op, source1_cat, source1_spec, source2_cat, source2_spec.

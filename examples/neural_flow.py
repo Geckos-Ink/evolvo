@@ -6,7 +6,19 @@ Demonstrate neural SET/CONV flow with consequents.
 import sys
 from pathlib import Path
 
-import torch
+_TORCH_IMPORT_ERROR = None
+try:
+    import torch
+except ImportError as exc:
+    torch = None  # type: ignore[assignment]
+    _TORCH_IMPORT_ERROR = exc
+
+
+def _require_torch(feature: str) -> None:
+    if torch is None:
+        raise ModuleNotFoundError(
+            f"`torch` is required for {feature}. Install it via `pip install torch`."
+        ) from _TORCH_IMPORT_ERROR
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC_PATH = ROOT / "src"
@@ -48,6 +60,7 @@ def add_conv_with_relu(genome: GFSLGenome, target_idx: int, source_idx: int) -> 
 
 
 def main() -> None:
+    _require_torch("examples/neural_flow.py")
     genome = GFSLGenome("neural")
     genome.validator.activate_type(DataType.TENSOR)
     genome.validator.variable_counts[int(DataType.TENSOR)] = 1  # Expose t$0 as input.

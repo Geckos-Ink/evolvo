@@ -8,20 +8,43 @@ from collections import defaultdict, deque
 from typing import List, Optional
 
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
+
+_TORCH_IMPORT_ERROR: Optional[ImportError] = None
+try:
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    import torch.optim as optim
+except ImportError as exc:
+    torch = None  # type: ignore[assignment]
+    nn = None  # type: ignore[assignment]
+    F = None  # type: ignore[assignment]
+    optim = None  # type: ignore[assignment]
+    _TORCH_IMPORT_ERROR = exc
+else:
+    _TORCH_IMPORT_ERROR = None
 
 from .custom_ops import custom_operations
 from .enums import Category, DataType, Operation
 from .genome import GFSLGenome
 
 
+def _require_torch(feature: str) -> None:
+    """Raise a user-friendly error when PyTorch is unavailable."""
+    if torch is None or nn is None or F is None or optim is None:
+        raise ModuleNotFoundError(
+            f"`torch` is required for {feature}. Install it via `pip install torch`."
+        ) from _TORCH_IMPORT_ERROR
+
+
+_BaseDirectionModule = nn.Module if nn is not None else object
+
+
 class GFSLFeatureExtractor:
     """Encodes GFSL genomes into fixed feature vectors aligned with GFSL papers."""
 
     def __init__(self, max_instructions: int = 128, max_outputs: int = 16, max_depth: int = 16):
+        _require_torch("GFSLFeatureExtractor")
         self.max_instructions = max_instructions
         self.max_outputs = max_outputs
         self.max_depth = max_depth
@@ -153,10 +176,11 @@ class GFSLFeatureExtractor:
         return torch.tensor(features, dtype=torch.float32)
 
 
-class GFSLSupervisedDirectionModel(nn.Module):
+class GFSLSupervisedDirectionModel(_BaseDirectionModule):
     """Small feed-forward network that predicts genome fitness."""
 
     def __init__(self, input_dim: int, hidden_layers: Optional[List[int]] = None):
+        _require_torch("GFSLSupervisedDirectionModel")
         super().__init__()
         layers: List[nn.Module] = []
         widths = hidden_layers or [128, 64]
@@ -188,6 +212,7 @@ class GFSLSupervisedGuide:
         max_observations: int = 20,
         device: Optional[str] = None,
     ):
+        _require_torch("GFSLSupervisedGuide")
         self.feature_extractor = GFSLFeatureExtractor()
         self.model = GFSLSupervisedDirectionModel(
             self.feature_extractor.feature_dim,

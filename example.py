@@ -17,7 +17,20 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
-import torch
+
+_TORCH_IMPORT_ERROR = None
+try:
+    import torch
+except ImportError as exc:
+    torch = None  # type: ignore[assignment]
+    _TORCH_IMPORT_ERROR = exc
+
+
+def _require_torch(feature: str) -> None:
+    if torch is None:
+        raise ModuleNotFoundError(
+            f"`torch` is required for {feature}. Install it via `pip install torch`."
+        ) from _TORCH_IMPORT_ERROR
 
 SRC_PATH = Path(__file__).resolve().parent / "src"
 if SRC_PATH.exists() and str(SRC_PATH) not in sys.path:
@@ -118,6 +131,7 @@ def run_example_script(filename: str) -> None:
 
 
 def main():
+    _require_torch("example.py supervised evolution demo")
     random.seed(42)
     np.random.seed(42)
     torch.manual_seed(42)

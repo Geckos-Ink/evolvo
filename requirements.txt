@@ -1,2 +1,2 @@
 numpy
-torch
+# Optional: install torch for supervised guidance or demos (`pip install torch`)

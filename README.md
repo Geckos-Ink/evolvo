@@ -1,6 +1,6 @@
 # Evolvo
 
-GFSL-aligned evolutionary search engine with supervised PyTorch guidance.
+GFSL-aligned evolutionary search engine with optional supervised PyTorch guidance.
 
 The project reimplements the **Genetic Fixed Structure Language (GFSL)** as described in the “GFSL Basic” and “GFSL Extensibility” papers. Evolvo keeps the strictly numeric, compressed instruction encoding (default 7 slots, auto-sized to the maximum declared expression length) while extending the framework with learning-based direction models that bias evolution toward higher-fitness regions.
 
@@ -14,10 +14,10 @@ The project reimplements the **Genetic Fixed Structure Language (GFSL)** as desc
 - **Cascading slot validator** with progressive type activation (decimal → boolean → tensor) and context-aware enumerations.
 - **Effective algorithm extraction** so execution only touches the instructions that matter.
 - **Targeted operation extraction** to pull only the dependencies for specific result references.
-- **Neural architecture support** via `RecursiveModelBuilder`, enabling GFSL to describe CNN/MLP topologies.
+- **Neural architecture support** via `RecursiveModelBuilder`, enabling GFSL to describe CNN/MLP topologies (requires PyTorch).
 - **Hybrid guidance**:
   - `GFSLQLearningGuide` learns slot choices with tabular Q-learning.
-  - `GFSLSupervisedGuide` is a PyTorch model that predicts fitness and proposes smarter mutations.
+  - `GFSLSupervisedGuide` is a PyTorch model that predicts fitness and proposes smarter mutations (optional; skip if PyTorch is unavailable).
 - **Real-time evaluation** (`RealTimeEvaluator`) with pluggable scoring aggregators and per-test callbacks.
 - **Rich utilities** for mutation, crossover, diversity tracking, and population management.
 - **Ad-hoc personalization** via `register_custom_operation`, letting you graft bespoke operations into the validator/executor without forking the core.
@@ -35,11 +35,14 @@ cd evolvo
 python3 -m venv .venv
 source .venv/bin/activate
 
-# install required runtime dependencies
-pip install torch numpy
+# install the base runtime dependency
+pip install numpy
+
+# install PyTorch if you plan to use the supervised guide, RecursiveModelBuilder, or the torch-backed examples
+pip install torch
 ```
 
-> The library only depends on NumPy and PyTorch. CUDA is optional; the supervised model automatically selects CPU when a GPU is unavailable.
+> The core library only depends on NumPy. PyTorch is optional and only required for supervised guidance, neural architecture assembly, or demos that call `torch`.
 
 If you are running directly from the repo (without installing a package), add the source folder to your Python path:
 
@@ -56,6 +59,8 @@ The simplest entry point is the quadratic-formula example that couples the evolv
 ```bash
 python example.py
 ```
+
+> This example requires PyTorch; install it only if you plan to use the supervised guide.
 
 Typical output (truncated):
 
@@ -222,6 +227,8 @@ print(executor.execute(best, {"d$0": 3.0}))
 ```
 
 ### 2. Neural Architecture Assembly
+
+> Running this snippet requires PyTorch because it instantiates `RecursiveModelBuilder`.
 
 ```python
 import torch

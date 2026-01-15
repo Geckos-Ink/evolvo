@@ -1,9 +1,25 @@
 """Neural model builder for GFSL genomes."""
 
-from typing import Tuple
+from __future__ import annotations
+
+from typing import Optional, Tuple
 
 import numpy as np
-import torch.nn as nn
+
+_TORCH_IMPORT_ERROR: Optional[ImportError] = None
+try:
+    import torch.nn as nn
+except ImportError as exc:
+    nn = None  # type: ignore[assignment]
+    _TORCH_IMPORT_ERROR = exc
+
+
+def _require_torch(feature: str = "RecursiveModelBuilder") -> None:
+    """Raise when torch is missing and a torch-based feature is hit."""
+    if nn is None:
+        raise ModuleNotFoundError(
+            f"`torch` is required for {feature}. Install it via `pip install torch`."
+        ) from _TORCH_IMPORT_ERROR
 
 from .enums import Category, ConfigProperty, DataType, Operation
 from .genome import GFSLGenome
@@ -24,6 +40,7 @@ class RecursiveModelBuilder:
 
     def build_from_genome(self, genome: GFSLGenome, input_shape: Tuple[int, ...]) -> nn.Module:
         """Build PyTorch model from GFSL genome."""
+        _require_torch()
         self.layers = []
         self.config_state = {}
         self.current_shape = input_shape
@@ -38,6 +55,7 @@ class RecursiveModelBuilder:
 
     def _process_neural_instruction(self, instr: GFSLInstruction):
         """Process instruction for neural architecture building."""
+        _require_torch()
         try:
             op = Operation(instr.operation)
         except ValueError:
