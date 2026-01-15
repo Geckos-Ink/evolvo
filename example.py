@@ -19,6 +19,10 @@ from typing import Dict, List, Tuple
 import numpy as np
 import torch
 
+SRC_PATH = Path(__file__).resolve().parent / "src"
+if SRC_PATH.exists() and str(SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(SRC_PATH))
+
 from evolvo import (
     Category,
     DataType,

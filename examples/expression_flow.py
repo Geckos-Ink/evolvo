@@ -3,6 +3,14 @@
 Demonstrate slot-wise expression building, option inspection, and consequents.
 """
 
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC_PATH = ROOT / "src"
+if SRC_PATH.exists() and str(SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(SRC_PATH))
+
 from evolvo import (
     DataType,
     GFSLExecutor,

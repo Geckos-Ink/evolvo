@@ -41,6 +41,12 @@ pip install torch numpy
 
 > The library only depends on NumPy and PyTorch. CUDA is optional; the supervised model automatically selects CPU when a GPU is unavailable.
 
+If you are running directly from the repo (without installing a package), add the source folder to your Python path:
+
+```bash
+export PYTHONPATH=src
+```
+
 ---
 
 ## Quick Start
@@ -102,6 +108,13 @@ print(best.to_human_readable())
 
 ---
 
+## Source Layout
+
+- `src/evolvo/` - modular package code (enums, slot utilities, validator, genome, executor, evolver, guidance models).
+- `example.py` and `examples/` - runnable scripts that bootstrap `src/` into `sys.path` for local runs.
+
+---
+
 ## Additional Examples
 
 Practical scripts live in `examples/`:
@@ -118,7 +131,7 @@ Practical scripts live in `examples/`:
 
 | Component | Purpose |
 |-----------|---------|
-| `GFSLInstruction` | 10-integer representation of each instruction. |
+| `GFSLInstruction` | Fixed-slot instruction representation (default 7 slots, auto-sized as needed). |
 | `SlotValidator` | Enforces cascading slot validity and tracks active variables/constants. |
 | `ValueEnumerations` | Operation- and config-specific lookup tables for numeric slots. |
 | `GFSLGenome` | Holds instructions, output declarations, signatures, and operation/effective extraction helpers. |
@@ -318,8 +331,8 @@ Because every slot is enumerated and validated, extending the system never intro
 To explore the classic demonstrations (without the supervised guide), run:
 
 ```bash
-python -c "from evolvo import example_formula_discovery; example_formula_discovery()"
-python -c "from evolvo import example_neural_architecture_search; example_neural_architecture_search()"
+PYTHONPATH=src python -c "from evolvo import example_formula_discovery; example_formula_discovery()"
+PYTHONPATH=src python -c "from evolvo import example_neural_architecture_search; example_neural_architecture_search()"
 ```
 
 They remain useful for validating the baseline evolver and seeing the raw GFSL output traces.

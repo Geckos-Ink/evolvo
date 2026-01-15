@@ -4,7 +4,34 @@ This file contains the directives for AIs, and has to be updated by AIs itself t
 
 Quick guidance for AI assistants working in this repository.
 
-- Source of truth: `papers/GFSL-definition.md` defines the GFSL slot semantics and constraints.
+## Source of truth
+- `papers/GFSL-definition.md` defines the GFSL slot semantics and constraints.
+
+## Repo layout (src-based)
+- `src/evolvo/` is the modular package.
+  - `enums.py` - Category, DataType, Operation, ConfigProperty, plus op groupings.
+  - `slots.py` - slot constants, names, pack/unpack helpers.
+  - `custom_ops.py` - CustomOperationManager, registry, registration helpers.
+  - `values.py` - ValueEnumerations (context-aware VALUE enumerations).
+  - `instruction.py` - GFSLInstruction, SlotOption, describe_slot_option.
+  - `validator.py` - SlotValidator (cascading validity + probability helpers).
+  - `builder.py` - GFSLExpressionBuilder (slot-wise construction).
+  - `genome.py` - GFSLGenome, extraction helpers, human-readable decoding.
+  - `executor.py` - GFSLExecutor (runtime execution).
+  - `evaluator.py` - RealTimeEvaluator.
+  - `model.py` - RecursiveModelBuilder.
+  - `evolver.py` - GFSLEvolver.
+  - `qlearning.py` - GFSLQLearningGuide.
+  - `supervised.py` - GFSLFeatureExtractor + GFSLSupervisedGuide.
+  - `demos.py` - example_formula_discovery + example_neural_architecture_search.
+- `example.py` and `examples/` scripts auto-insert `src/` into `sys.path` for local runs.
+
+## Usage notes
+- When running ad-hoc scripts from the repo, set `PYTHONPATH=src` or use the provided scripts that bootstrap the path.
+- `custom_operations` is a global registry; `ValueEnumerations` consults it for custom value enumerations.
+- `src/evolvo/__init__.py` re-exports the public API; prefer `from evolvo import ...`.
+
+## GFSL slot semantics and validity
 - Instruction layout: fixed per genome, default is 7 slots (2-slot address + op + 2-slot address + 2-slot address), auto-sized to the maximum declared expression length.
 - Slot order: target_cat, target_spec, op, source1_cat, source1_spec, source2_cat, source2_spec.
 - Address encoding: use `pack_type_index` and `unpack_type_index` for variable/constant slots.
@@ -15,3 +42,6 @@ Quick guidance for AI assistants working in this repository.
 - Probability support: `SlotValidator.option_success_probabilities` and `SlotValidator.build_probability_tree`
   provide success likelihoods per option.
 - SET operations: source1 is CONFIG property, source2 is VALUE from the property-specific enumeration.
+
+## Suggested verification
+- No automated test suite; run `python example.py` and `python examples/*.py` for smoke coverage.
