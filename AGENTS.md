@@ -17,6 +17,7 @@ Quick guidance for AI assistants working in this repository.
   - `validator.py` - SlotValidator (cascading validity + probability helpers).
   - `builder.py` - GFSLExpressionBuilder (slot-wise construction).
   - `genome.py` - GFSLGenome, extraction helpers, human-readable decoding.
+  - `weights.py` - OperationWeights (optional per-op and group metadata).
   - `executor.py` - GFSLExecutor (runtime execution).
   - `evaluator.py` - RealTimeEvaluator.
   - `model.py` - RecursiveModelBuilder.
@@ -30,6 +31,9 @@ Quick guidance for AI assistants working in this repository.
 - When running ad-hoc scripts from the repo, set `PYTHONPATH=src` or use the provided scripts that bootstrap the path.
 - `custom_operations` is a global registry; `ValueEnumerations` consults it for custom value enumerations.
 - `src/evolvo/__init__.py` re-exports the public API; prefer `from evolvo import ...`.
+- Operation weights are optional metadata: `GFSLInstruction.weight` or `GFSLGenome.set_instruction_weights(...)` for
+  per-instruction groups, and `GFSLGenome.operation_weights` (OperationWeights) for per-op/group weighting; weights do not
+  affect execution/signatures.
 
 ## Optional dependencies
 - `torch` (including `torch.nn`, `torch.nn.functional`, and `torch.optim`) is optional. The supervised guidance stack (`src/evolvo/supervised.py`), the neural model builder (`src/evolvo/model.py`), GPU-aware demos, and the provided example scripts now raise informative errors when PyTorch is missing so the rest of the library can be imported with only NumPy installed.
@@ -48,3 +52,6 @@ Quick guidance for AI assistants working in this repository.
 
 ## Suggested verification
 - No automated test suite; run `python example.py` and `python examples/*.py` for smoke coverage.
+
+## Roadmap / next steps
+- Operation conversion table (map ops to alternatives per device profile using weights).

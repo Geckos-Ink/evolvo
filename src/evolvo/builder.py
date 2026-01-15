@@ -236,6 +236,11 @@ class GFSLExpressionBuilder:
         self._consequents = []
         return self
 
+    def weight(self, value: Optional[float]) -> "GFSLExpressionBuilder":
+        """Assign an optional weight to the in-progress instruction."""
+        self.instruction.weight = None if value is None else float(value)
+        return self
+
     def _set_pointer(
         self,
         cat_slot: int,

@@ -30,8 +30,14 @@ class GFSLInstruction:
     """
 
     slots: List[int]
+    weight: Optional[float] = None
 
-    def __init__(self, slots: Optional[List[int]] = None, slot_count: Optional[int] = None):
+    def __init__(
+        self,
+        slots: Optional[List[int]] = None,
+        slot_count: Optional[int] = None,
+        weight: Optional[float] = None,
+    ):
         if slot_count is None:
             slot_count = len(slots) if slots is not None else DEFAULT_SLOT_COUNT
         if slots is None:
@@ -39,6 +45,7 @@ class GFSLInstruction:
         else:
             assert len(slots) == slot_count, f"Instruction must have exactly {slot_count} slots"
             self.slots = slots
+        self.weight = None if weight is None else float(weight)
 
     def slot_value(self, index: int) -> int:
         """Return slot value or 0 when index is out of range."""
@@ -140,7 +147,11 @@ class GFSLInstruction:
 
     def copy(self) -> "GFSLInstruction":
         """Create deep copy."""
-        return GFSLInstruction(self.slots.copy(), slot_count=len(self.slots))
+        return GFSLInstruction(
+            self.slots.copy(),
+            slot_count=len(self.slots),
+            weight=self.weight,
+        )
 
 
 @dataclass(frozen=True)

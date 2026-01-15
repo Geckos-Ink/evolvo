@@ -19,6 +19,7 @@ The project reimplements the **Genetic Fixed Structure Language (GFSL)** as desc
   - `GFSLQLearningGuide` learns slot choices with tabular Q-learning.
   - `GFSLSupervisedGuide` is a PyTorch model that predicts fitness and proposes smarter mutations (optional; skip if PyTorch is unavailable).
 - **Real-time evaluation** (`RealTimeEvaluator`) with pluggable scoring aggregators and per-test callbacks.
+- **Operation weights (optional)** to attach usefulness or performance metadata to instructions or operation groups.
 - **Rich utilities** for mutation, crossover, diversity tracking, and population management.
 - **Ad-hoc personalization** via `register_custom_operation`, letting you graft bespoke operations into the validator/executor without forking the core.
 
@@ -195,6 +196,37 @@ Ordering options:
 
 ---
 
+## Operation Weights (Optional)
+
+Attach weights to individual instructions or to groups of operations to capture
+usefulness heuristics, device-specific performance costs, or guidance priors.
+Weights are metadata only; execution and signatures ignore them.
+
+```python
+from evolvo import GFSLGenome, Operation
+
+genome = GFSLGenome("algorithm")
+# ... add instructions ...
+
+genome.set_instruction_weight(0, 0.75)  # per-instruction override
+genome.set_instruction_weights([1, 2, 3], 0.5)
+
+genome.operation_weights.set_operation_weight(Operation.MUL, 0.4)
+genome.operation_weights.set_group(
+    "heavy_ops",
+    [Operation.CONV, Operation.LINEAR],
+    weight=2.0,
+)
+
+print(genome.instruction_weight(0))
+print(genome.to_human_readable(include_weights=True))
+```
+
+If an operation belongs to multiple groups, `OperationWeights.resolve_weight`
+combines group weights using `group_reduce` (default: `"mean"`).
+
+---
+
 ## Practical Examples
 
 ### 1. Formula Discovery (Algorithms)
@@ -351,6 +383,7 @@ They remain useful for validating the baseline evolver and seeing the raw GFSL o
 - Gradient-informed mutation proposals (hybrid neuro-evolution).
 - Additional tensor ops (attention, modern normalization layers).
 - Benchmarks comparing supervised guidance vs. unguided baselines.
+- Operation conversion tables and device-targeted weight profiles.
 - Exporters for ONNX / TorchScript from GFSL neural genomes.
 
 ---

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import heapq
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from .builder import GFSLExpressionBuilder
 from .custom_ops import resolve_operation_name
@@ -14,6 +14,7 @@ from .instruction import GFSLInstruction
 from .slots import DEFAULT_SLOT_COUNT
 from .validator import SlotValidator
 from .values import ValueEnumerations
+from .weights import OperationWeights
 
 
 class GFSLGenome:
@@ -39,6 +40,7 @@ class GFSLGenome:
         self.generation: int = 0
         self._signature: Optional[str] = None
         self._effective_instructions: Optional[List[int]] = None
+        self.operation_weights = OperationWeights()
 
     def expression(self) -> GFSLExpressionBuilder:
         """Create a slot-wise instruction builder bound to this genome."""
@@ -112,6 +114,45 @@ class GFSLGenome:
         """Mark a variable as output."""
         self.outputs.append((Category.VARIABLE, var_type, var_index))
         self._effective_instructions = None
+
+    def set_instruction_weight(self, instruction_index: int, weight: Optional[float]) -> None:
+        """Assign or clear an explicit weight for a single instruction."""
+        if instruction_index < 0 or instruction_index >= len(self.instructions):
+            raise IndexError("Instruction index out of range.")
+        self.instructions[instruction_index].weight = (
+            None if weight is None else float(weight)
+        )
+
+    def set_instruction_weights(
+        self, instruction_indices: Iterable[int], weight: Optional[float]
+    ) -> None:
+        """Assign or clear an explicit weight for multiple instructions."""
+        for instruction_index in instruction_indices:
+            self.set_instruction_weight(instruction_index, weight)
+
+    def instruction_weight(
+        self,
+        instruction: Union[int, GFSLInstruction],
+        *,
+        default: Optional[float] = None,
+        group_reduce: str = "mean",
+    ) -> Optional[float]:
+        """
+        Resolve the weight for an instruction, honoring explicit weights first.
+        """
+        if isinstance(instruction, int):
+            instr = self.instructions[instruction]
+        else:
+            instr = instruction
+
+        if instr.weight is not None:
+            return instr.weight
+
+        return self.operation_weights.resolve_weight(
+            instr.operation,
+            default=default,
+            group_reduce=group_reduce,
+        )
 
     def _build_dependency_graph(
         self,
@@ -375,22 +416,33 @@ class GFSLGenome:
             self._signature = hashlib.md5("|".join(sig_parts).encode()).hexdigest()
         return self._signature
 
-    def to_human_readable(self) -> List[str]:
+    def to_human_readable(self, *, include_weights: bool = False) -> List[str]:
         """Convert to human-readable format."""
         readable = []
         for idx, instr in enumerate(self.instructions):
             is_effective = idx in self.extract_effective_algorithm()
             prefix = "✓" if is_effective else "✗"
+            weight_suffix = ""
+            if include_weights:
+                weight = self.instruction_weight(instr)
+                if weight is not None:
+                    weight_suffix = f" [w={weight:.3f}]"
 
             if instr.target_cat == Category.NONE:
                 if instr.operation == Operation.IF:
-                    readable.append(f"{prefix} IF {self._decode_source(instr, 1)}")
+                    readable.append(
+                        f"{prefix} IF {self._decode_source(instr, 1)}{weight_suffix}"
+                    )
                 elif instr.operation == Operation.WHILE:
-                    readable.append(f"{prefix} WHILE {self._decode_source(instr, 1)}")
+                    readable.append(
+                        f"{prefix} WHILE {self._decode_source(instr, 1)}{weight_suffix}"
+                    )
                 elif instr.operation == Operation.END:
-                    readable.append(f"{prefix} END")
+                    readable.append(f"{prefix} END{weight_suffix}")
                 elif instr.operation == Operation.RESULT:
-                    readable.append(f"{prefix} RESULT {self._decode_source(instr, 1)}")
+                    readable.append(
+                        f"{prefix} RESULT {self._decode_source(instr, 1)}{weight_suffix}"
+                    )
             else:
                 target = self._decode_target(instr)
                 op_name = resolve_operation_name(instr.operation)
@@ -398,9 +450,13 @@ class GFSLGenome:
                 source2 = self._decode_source(instr, 2)
 
                 if instr.source2_cat == Category.NONE:
-                    readable.append(f"{prefix} {target} = {op_name}({source1})")
+                    readable.append(
+                        f"{prefix} {target} = {op_name}({source1}){weight_suffix}"
+                    )
                 else:
-                    readable.append(f"{prefix} {target} = {op_name}({source1}, {source2})")
+                    readable.append(
+                        f"{prefix} {target} = {op_name}({source1}, {source2}){weight_suffix}"
+                    )
 
         return readable
 

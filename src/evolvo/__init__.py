@@ -44,6 +44,7 @@ from .custom_ops import (
 )
 from .values import ValueEnumerations
 from .instruction import GFSLInstruction, SlotOption, describe_slot_option
+from .weights import OperationWeights
 from .validator import SlotValidator
 from .builder import GFSLExpressionBuilder
 from .genome import GFSLGenome
@@ -97,6 +98,7 @@ __all__ = [
     "resolve_operation_name",
     "infer_source_type",
     "ValueEnumerations",
+    "OperationWeights",
     "GFSLInstruction",
     "SlotOption",
     "describe_slot_option",
