@@ -136,7 +136,7 @@ class GFSLExpressionBuilder:
         if cat_value == Category.NONE:
             return self.choose(0)
         if dtype is None or index is None:
-            raise ValueError("dtype and index are required for variable/constant targets.")
+            raise ValueError("dtype and index are required for typed targets.")
         spec = pack_type_index(dtype, index)
         return self.choose(spec)
 
@@ -145,6 +145,9 @@ class GFSLExpressionBuilder:
 
     def target_const(self, dtype: Union[DataType, int], index: int) -> "GFSLExpressionBuilder":
         return self.target(Category.CONSTANT, dtype=dtype, index=index)
+
+    def target_list(self, dtype: Union[DataType, int], index: int) -> "GFSLExpressionBuilder":
+        return self.target(Category.LIST, dtype=dtype, index=index)
 
     def target_none(self) -> "GFSLExpressionBuilder":
         return self.target(Category.NONE)
@@ -164,6 +167,12 @@ class GFSLExpressionBuilder:
     def source1_const(self, dtype: Union[DataType, int], index: int) -> "GFSLExpressionBuilder":
         return self.source1(Category.CONSTANT, pack_type_index(dtype, index))
 
+    def source1_list(
+        self, dtype: Union[DataType, int], index: int, *, constant: bool = False
+    ) -> "GFSLExpressionBuilder":
+        category = Category.LIST_CONSTANT if constant else Category.LIST
+        return self.source1(category, pack_type_index(dtype, index))
+
     def source1_value_index(self, index: int) -> "GFSLExpressionBuilder":
         return self.source1(Category.VALUE, int(index))
 
@@ -181,6 +190,12 @@ class GFSLExpressionBuilder:
 
     def source2_const(self, dtype: Union[DataType, int], index: int) -> "GFSLExpressionBuilder":
         return self.source2(Category.CONSTANT, pack_type_index(dtype, index))
+
+    def source2_list(
+        self, dtype: Union[DataType, int], index: int, *, constant: bool = False
+    ) -> "GFSLExpressionBuilder":
+        category = Category.LIST_CONSTANT if constant else Category.LIST
+        return self.source2(category, pack_type_index(dtype, index))
 
     def source2_value_index(self, index: int) -> "GFSLExpressionBuilder":
         return self.source2(Category.VALUE, int(index))

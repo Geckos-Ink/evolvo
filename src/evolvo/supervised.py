@@ -126,7 +126,13 @@ class GFSLFeatureExtractor:
                     continue
                 if source_cat == Category.VALUE:
                     value_sources += 1
-                if source_cat in (Category.VARIABLE, Category.CONSTANT, Category.VALUE):
+                if source_cat in (
+                    Category.VARIABLE,
+                    Category.CONSTANT,
+                    Category.VALUE,
+                    Category.LIST,
+                    Category.LIST_CONSTANT,
+                ):
                     source_dtype = DataType(source_type_int)
                     source_type_counts[source_dtype] += 1
                     source_total += 1

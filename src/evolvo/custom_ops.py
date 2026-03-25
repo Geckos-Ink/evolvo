@@ -15,6 +15,9 @@ from .enums import (
     BOOLEAN_LOGIC_OPS,
     CONTROL_FLOW_OPS,
     DECIMAL_OPS,
+    LIST_QUERY_OPS,
+    LIST_TARGET_OPS,
+    LIST_VALUE_OPS,
     TENSOR_OPS,
 )
 
@@ -296,6 +299,10 @@ def infer_source_type(op_code: int, source_index: int) -> int:
         return int(DataType.BOOLEAN)
     if op in (Operation.IF, Operation.WHILE):
         return int(DataType.BOOLEAN)
+    if op in LIST_TARGET_OPS or op in LIST_VALUE_OPS:
+        return int(DataType.NONE)
+    if op in LIST_QUERY_OPS:
+        return int(DataType.NONE)
     if op in DECIMAL_OPS:
         return int(DataType.DECIMAL)
     if op in TENSOR_OPS:

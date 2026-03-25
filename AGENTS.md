@@ -31,6 +31,9 @@ Quick guidance for AI assistants working in this repository.
 - When running ad-hoc scripts from the repo, set `PYTHONPATH=src` or use the provided scripts that bootstrap the path.
 - `custom_operations` is a global registry; `ValueEnumerations` consults it for custom value enumerations.
 - `src/evolvo/__init__.py` re-exports the public API; prefer `from evolvo import ...`.
+- Typed list pointers are supported:
+  - Mutable list: `d!0`, `b!1`, `t!0` (`Category.LIST`)
+  - Constant list: `d!#0` (`Category.LIST_CONSTANT`, clone-only source)
 - Operation weights are optional metadata: `GFSLInstruction.weight` or `GFSLGenome.set_instruction_weights(...)` for
   per-instruction groups, and `GFSLGenome.operation_weights` (OperationWeights) for per-op/group weighting; weights do not
   affect execution/signatures.
@@ -41,7 +44,7 @@ Quick guidance for AI assistants working in this repository.
 ## GFSL slot semantics and validity
 - Instruction layout: fixed per genome, default is 7 slots (2-slot address + op + 2-slot address + 2-slot address), auto-sized to the maximum declared expression length.
 - Slot order: target_cat, target_spec, op, source1_cat, source1_spec, source2_cat, source2_spec.
-- Address encoding: use `pack_type_index` and `unpack_type_index` for variable/constant slots.
+- Address encoding: use `pack_type_index` and `unpack_type_index` for variable/constant/list slots.
 - Slot sizing: `GFSLInstruction` infers slot count from the provided list; `GFSLGenome` auto-expands to the max length.
 - Fixed sizing: pass `auto_slot_count=False` or `slot_count=...` on `GFSLGenome` to lock the size.
 - Validity rules: always use `SlotValidator.get_valid_options` and prefer `SlotValidator.choose_option` or
@@ -49,9 +52,21 @@ Quick guidance for AI assistants working in this repository.
 - Probability support: `SlotValidator.option_success_probabilities` and `SlotValidator.build_probability_tree`
   provide success likelihoods per option.
 - SET operations: source1 is CONFIG property, source2 is VALUE from the property-specific enumeration.
+- List operations:
+  - `PREPEND` / `APPEND` target a typed list and insert source1.
+  - `CLONE` copies from mutable list (`!`) or constant list (`!#`) into a mutable target list.
+  - `FIFO` / `FILO` pop from mutable list sources.
+  - `LISTCOUNT` returns decimal length, `LISTHASITEMS` returns boolean non-empty status.
+  - `FIFO` / `FILO` on empty list emit runtime `VOID`; any downstream instruction reading a `VOID` input is skipped.
+- Validator list gating:
+  - `CLONE` appears only when at least one compatible `!` or `!#` source exists.
+  - `FIFO`/`FILO` appear only when at least one compatible mutable list exists.
+  - `LISTCOUNT`/`LISTHASITEMS` appear only when at least one mutable list exists.
+  - `seed_list_count(dtype, count, constant=...)` can expose pre-existing runtime lists to option generation.
 
 ## Suggested verification
 - No automated test suite; run `python example.py` and `python examples/*.py` for smoke coverage.
 
 ## Roadmap / next steps
 - Operation conversion table (map ops to alternatives per device profile using weights).
+- Add list-oriented smoke examples in `examples/` (queue/stack and constant-list cloning).

@@ -8,16 +8,19 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .custom_ops import custom_operations, infer_source_type
 from .enums import (
-    Category,
-    ConfigProperty,
-    DataType,
-    Operation,
     BINARY_OPS,
-    CONTROL_FLOW_OPS,
-    DECIMAL_OPS,
-    TENSOR_OPS,
     BOOLEAN_COMPARE_OPS,
     BOOLEAN_LOGIC_OPS,
+    Category,
+    ConfigProperty,
+    CONTROL_FLOW_OPS,
+    DataType,
+    DECIMAL_OPS,
+    LIST_QUERY_OPS,
+    LIST_TARGET_OPS,
+    LIST_VALUE_OPS,
+    Operation,
+    TENSOR_OPS,
 )
 from .instruction import GFSLInstruction
 from .slots import (
@@ -47,6 +50,8 @@ class SlotValidator:
         self.active_types = {DataType.DECIMAL}  # Start with decimal only
         self.variable_counts = defaultdict(int)
         self.constant_counts = defaultdict(int)
+        self.list_counts = defaultdict(int)
+        self.constant_list_counts = defaultdict(int)
         self.scope_depth = 0
         self.config_state = {}
 
@@ -66,20 +71,20 @@ class SlotValidator:
 
     def _alloc_specifiers(self, category: Category, types: List[DataType]) -> List[int]:
         options: List[int] = []
+        counters = self._counter_for_category(category)
+        if counters is None:
+            return options
         for dtype in types:
-            if category == Category.VARIABLE:
-                count = self.variable_counts[int(dtype)]
-            else:
-                count = self.constant_counts[int(dtype)]
+            count = counters[int(dtype)]
             for idx in range(count + 1):
                 options.append(pack_type_index(dtype, idx))
         return options
 
     def _existing_specifiers(self, category: Category, dtype: DataType) -> List[int]:
-        if category == Category.VARIABLE:
-            count = self.variable_counts[int(dtype)]
-        else:
-            count = self.constant_counts[int(dtype)]
+        counters = self._counter_for_category(category)
+        if counters is None:
+            return []
+        count = counters[int(dtype)]
         if count <= 0:
             return []
         return [pack_type_index(dtype, idx) for idx in range(count)]
@@ -98,13 +103,79 @@ class SlotValidator:
         enum = ValueEnumerations.get_enumeration((op, prop))
         return list(range(len(enum))) if enum else []
 
+    def _counter_for_category(self, category: Category):
+        if category == Category.VARIABLE:
+            return self.variable_counts
+        if category == Category.CONSTANT:
+            return self.constant_counts
+        if category == Category.LIST:
+            return self.list_counts
+        if category == Category.LIST_CONSTANT:
+            return self.constant_list_counts
+        return None
+
+    def _target_dtype(self, instruction: GFSLInstruction) -> Optional[DataType]:
+        target_cat = instruction.slot_value(SLOT_TARGET_CAT)
+        target_spec = instruction.slot_value(SLOT_TARGET_SPEC)
+        if target_cat in (
+            Category.VARIABLE,
+            Category.CONSTANT,
+            Category.LIST,
+            Category.LIST_CONSTANT,
+        ):
+            target_type, _ = unpack_type_index(target_spec)
+            try:
+                return DataType(target_type)
+            except ValueError:
+                return None
+        return None
+
+    def _has_scalar_source_for_dtype(self, dtype: DataType) -> bool:
+        if self.variable_counts[int(dtype)] > 0:
+            return True
+        if self.constant_counts[int(dtype)] > 0:
+            return True
+        if dtype == DataType.DECIMAL:
+            return bool(self._value_option_indices(Operation.APPEND))
+        return False
+
+    def _has_lists(self, dtype: Optional[DataType] = None, *, include_constant: bool = False) -> bool:
+        if dtype is not None:
+            if self.list_counts[int(dtype)] > 0:
+                return True
+            if include_constant and self.constant_list_counts[int(dtype)] > 0:
+                return True
+            return False
+        for active_type in self.active_types:
+            if self._has_lists(active_type, include_constant=include_constant):
+                return True
+        return False
+
+    def _list_source_categories_for_dtype(self, dtype: DataType) -> List[int]:
+        categories: List[int] = []
+        if self.variable_counts[int(dtype)] > 0:
+            categories.append(int(Category.VARIABLE))
+        if self.constant_counts[int(dtype)] > 0:
+            categories.append(int(Category.CONSTANT))
+        if dtype == DataType.DECIMAL and self._value_option_indices(Operation.APPEND):
+            categories.append(int(Category.VALUE))
+        return categories
+
+    def seed_list_count(
+        self, dtype: DataType, count: int, *, constant: bool = False
+    ) -> None:
+        """Seed known list counts (useful for pre-existing runtime list inputs)."""
+        dtype_key = int(DataType(dtype))
+        target = self.constant_list_counts if constant else self.list_counts
+        target[dtype_key] = max(int(target[dtype_key]), int(count))
+
     def get_valid_options(self, instruction: GFSLInstruction, slot_index: int) -> List[int]:
         """Get valid options for a specific slot given all previous slots."""
         if slot_index >= self.slot_count:
             return []
 
         if slot_index == SLOT_TARGET_CAT:
-            return [Category.NONE, Category.VARIABLE, Category.CONSTANT]
+            return [Category.NONE, Category.VARIABLE, Category.CONSTANT, Category.LIST]
 
         if slot_index == SLOT_TARGET_SPEC:
             target_cat = instruction.slot_value(SLOT_TARGET_CAT)
@@ -117,13 +188,20 @@ class SlotValidator:
                     Category.CONSTANT,
                     [DataType.BOOLEAN, DataType.DECIMAL],
                 )
+            if target_cat == Category.LIST:
+                return self._alloc_specifiers(Category.LIST, sorted(self.active_types))
             return []
 
         if slot_index == SLOT_OPERATION:
             target_cat = instruction.slot_value(SLOT_TARGET_CAT)
             target_spec = instruction.slot_value(SLOT_TARGET_SPEC)
             target_type = int(DataType.NONE)
-            if target_cat in (Category.VARIABLE, Category.CONSTANT):
+            if target_cat in (
+                Category.VARIABLE,
+                Category.CONSTANT,
+                Category.LIST,
+                Category.LIST_CONSTANT,
+            ):
                 target_type, _ = unpack_type_index(target_spec)
 
             valid_ops: List[Operation] = []
@@ -133,17 +211,35 @@ class SlotValidator:
             except ValueError:
                 dtype_enum = DataType.NONE
 
-            if target_cat != Category.NONE and dtype_enum != DataType.NONE:
+            if (
+                target_cat in (Category.VARIABLE, Category.CONSTANT)
+                and dtype_enum != DataType.NONE
+            ):
                 custom_codes = custom_operations.codes_for_target(dtype_enum)
 
             if target_cat == Category.NONE:
                 valid_ops = CONTROL_FLOW_OPS
+            elif target_cat == Category.LIST and dtype_enum != DataType.NONE:
+                if self._has_scalar_source_for_dtype(dtype_enum):
+                    valid_ops.extend([Operation.PREPEND, Operation.APPEND])
+                if self._has_lists(dtype_enum, include_constant=True):
+                    valid_ops.append(Operation.CLONE)
             elif target_type == DataType.BOOLEAN:
                 valid_ops = BOOLEAN_COMPARE_OPS + BOOLEAN_LOGIC_OPS
+                if self._has_lists(dtype_enum):
+                    valid_ops.extend(LIST_VALUE_OPS)
+                if self._has_lists():
+                    valid_ops.append(Operation.LISTHASITEMS)
             elif target_type == DataType.DECIMAL:
                 valid_ops = DECIMAL_OPS
+                if self._has_lists(dtype_enum):
+                    valid_ops.extend(LIST_VALUE_OPS)
+                if self._has_lists():
+                    valid_ops.append(Operation.LISTCOUNT)
             elif target_type == DataType.TENSOR:
                 valid_ops = TENSOR_OPS
+                if self._has_lists(dtype_enum):
+                    valid_ops.extend(LIST_VALUE_OPS)
 
             result_ops = [int(op) for op in valid_ops]
             result_ops.extend(custom_codes)
@@ -152,6 +248,7 @@ class SlotValidator:
         if slot_index == SLOT_SOURCE1_CAT:
             op = instruction.slot_value(SLOT_OPERATION)
             custom_op = custom_operations.get(op)
+            target_dtype = self._target_dtype(instruction)
             if custom_op:
                 allowed = custom_operations.allowed_categories(op, 1)
                 if not allowed:
@@ -166,12 +263,30 @@ class SlotValidator:
                 return [Category.VARIABLE]
             if op in (Operation.IF, Operation.WHILE):
                 return [Category.VARIABLE, Category.CONSTANT]
+            if op in (Operation.PREPEND, Operation.APPEND):
+                if target_dtype is None:
+                    return []
+                return self._list_source_categories_for_dtype(target_dtype)
+            if op == Operation.CLONE:
+                if target_dtype is None:
+                    return []
+                options: List[int] = []
+                if self._has_lists(target_dtype):
+                    options.append(int(Category.LIST))
+                if self._has_lists(target_dtype, include_constant=True) and (
+                    self.constant_list_counts[int(target_dtype)] > 0
+                ):
+                    options.append(int(Category.LIST_CONSTANT))
+                return options
+            if op in (Operation.FIFO, Operation.FILO, Operation.LISTCOUNT, Operation.LISTHASITEMS):
+                return [Category.LIST]
             return [Category.VARIABLE, Category.CONSTANT, Category.VALUE]
 
         if slot_index == SLOT_SOURCE1_SPEC:
             source1_cat = instruction.slot_value(SLOT_SOURCE1_CAT)
             op = instruction.slot_value(SLOT_OPERATION)
             custom_op = custom_operations.get(op)
+            target_dtype = self._target_dtype(instruction)
             if source1_cat == Category.NONE:
                 return [0]
 
@@ -190,7 +305,22 @@ class SlotValidator:
                     return [int(p) for p in ConfigProperty]
                 return []
 
+            if source1_cat in (Category.LIST, Category.LIST_CONSTANT):
+                if source1_cat == Category.LIST_CONSTANT and op != Operation.CLONE:
+                    return []
+                if op in (Operation.CLONE, Operation.FIFO, Operation.FILO) and target_dtype:
+                    return self._existing_specifiers(source1_cat, target_dtype)
+                if op in (Operation.LISTCOUNT, Operation.LISTHASITEMS):
+                    return self._existing_specifiers_for_types(
+                        source1_cat, sorted(self.active_types)
+                    )
+                return []
+
             if source1_cat in (Category.VARIABLE, Category.CONSTANT):
+                if op in (Operation.PREPEND, Operation.APPEND):
+                    if target_dtype is None:
+                        return []
+                    return self._existing_specifiers(source1_cat, target_dtype)
                 if op == Operation.RESULT:
                     return self._existing_specifiers_for_types(
                         source1_cat,
@@ -202,6 +332,9 @@ class SlotValidator:
                 return self._existing_specifiers(source1_cat, DataType(dtype))
 
             if source1_cat == Category.VALUE:
+                if op in (Operation.PREPEND, Operation.APPEND):
+                    if target_dtype != DataType.DECIMAL:
+                        return []
                 return self._value_option_indices(op)
 
             return []
@@ -217,6 +350,8 @@ class SlotValidator:
                     return []
                 return [int(cat) for cat in allowed]
 
+            if op in LIST_TARGET_OPS or op in LIST_VALUE_OPS or op in LIST_QUERY_OPS:
+                return [Category.NONE]
             if op == Operation.SET:
                 return [Category.VALUE]
             if op in BINARY_OPS:
@@ -404,6 +539,12 @@ class SlotValidator:
         elif target_cat == Category.CONSTANT:
             if target_index >= self.constant_counts[target_type]:
                 self.constant_counts[target_type] = target_index + 1
+        elif target_cat == Category.LIST:
+            if target_index >= self.list_counts[target_type]:
+                self.list_counts[target_type] = target_index + 1
+        elif target_cat == Category.LIST_CONSTANT:
+            if target_index >= self.constant_list_counts[target_type]:
+                self.constant_list_counts[target_type] = target_index + 1
 
         if op == Operation.IF or op == Operation.WHILE:
             self.scope_depth += 1

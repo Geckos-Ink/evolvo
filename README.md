@@ -20,6 +20,7 @@ The project reimplements the **Genetic Fixed Structure Language (GFSL)** as desc
   - `GFSLSupervisedGuide` is a PyTorch model that predicts fitness and proposes smarter mutations (optional; skip if PyTorch is unavailable).
 - **Real-time evaluation** (`RealTimeEvaluator`) with pluggable scoring aggregators and per-test callbacks.
 - **Operation weights (optional)** to attach usefulness or performance metadata to instructions or operation groups.
+- **Optional typed list support** with `d!0` / `d!#0` references and dedicated queue/stack ops (`PREPEND`, `APPEND`, `CLONE`, `FIFO`, `FILO`, `LISTCOUNT`, `LISTHASITEMS`).
 - **Rich utilities** for mutation, crossover, diversity tracking, and population management.
 - **Ad-hoc personalization** via `register_custom_operation`, letting you graft bespoke operations into the validator/executor without forking the core.
 
@@ -138,7 +139,7 @@ Practical scripts live in `examples/`:
 | Component | Purpose |
 |-----------|---------|
 | `GFSLInstruction` | Fixed-slot instruction representation (default 7 slots, auto-sized as needed). |
-| `SlotValidator` | Enforces cascading slot validity and tracks active variables/constants. |
+| `SlotValidator` | Enforces cascading slot validity and tracks active variables/constants/lists. |
 | `ValueEnumerations` | Operation- and config-specific lookup tables for numeric slots. |
 | `GFSLGenome` | Holds instructions, output declarations, signatures, and operation/effective extraction helpers. |
 | `GFSLExecutor` | Executes only the effective instructions while supporting injected inputs. |
@@ -186,6 +187,7 @@ indices = genome.extract_operation_indices(order="fixed")
 
 Result reference forms:
 - `"d$3"` or `"b#0"`
+- `"d!0"` or `"d!#0"` (typed list and typed constant-list references)
 - `(DataType.DECIMAL, 3)` or `(Category.VARIABLE, DataType.DECIMAL, 3)`
 - `{"category": Category.VARIABLE, "dtype": DataType.DECIMAL, "index": 3}`
 
@@ -224,6 +226,53 @@ print(genome.to_human_readable(include_weights=True))
 
 If an operation belongs to multiple groups, `OperationWeights.resolve_weight`
 combines group weights using `group_reduce` (default: `"mean"`).
+
+---
+
+## Optional Typed Lists
+
+List pointers use the `!` symbol and keep the same typed-prefix style as variables/constants:
+- `d!0` → mutable decimal list index 0
+- `b!1` → mutable boolean list index 1
+- `d!#0` → constant decimal list index 0 (clone-only source)
+
+Supported built-ins:
+- `PREPEND` / `APPEND`: write an item into a target list (target may allocate `n+1`).
+- `CLONE`: copy `d!k` or `d!#k` into a new mutable list.
+- `FIFO` / `FILO`: pop first/last item from a mutable list.
+- `LISTCOUNT`: decimal count of items.
+- `LISTHASITEMS`: boolean non-empty check.
+
+When `FIFO`/`FILO` are executed on an empty list, the result is `VOID` (exported as `None` in outputs). Later instructions that consume that `VOID` value are skipped.
+
+```python
+from evolvo import (
+    Category, DataType, GFSLExecutor, GFSLGenome, GFSLInstruction,
+    Operation, pack_type_index
+)
+
+genome = GFSLGenome("algorithm")
+genome.validator.activate_type(DataType.BOOLEAN)
+
+# d!0 = APPEND(1.0)
+genome.add_instruction(GFSLInstruction([
+    Category.LIST, pack_type_index(DataType.DECIMAL, 0), Operation.APPEND,
+    Category.VALUE, 1,  # 1.0 from default math enumeration
+    Category.NONE, 0,
+]))
+
+# d$0 = FILO(d!0)
+genome.add_instruction(GFSLInstruction([
+    Category.VARIABLE, pack_type_index(DataType.DECIMAL, 0), Operation.FILO,
+    Category.LIST, pack_type_index(DataType.DECIMAL, 0),
+    Category.NONE, 0,
+]))
+
+genome.mark_output(DataType.DECIMAL, 0)
+print(GFSLExecutor().execute(genome))  # {'d$0': 1.0}
+```
+
+Use `genome.seed_list_count(dtype, count, constant=True)` (or `genome.validator.seed_list_count(...)`) to expose pre-existing constant list sources (`!#`) to the validator.
 
 ---
 

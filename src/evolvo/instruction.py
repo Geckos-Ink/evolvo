@@ -6,7 +6,13 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from .custom_ops import infer_source_type, resolve_operation_name
-from .enums import Category, ConfigProperty, DataType, Operation
+from .enums import (
+    Category,
+    ConfigProperty,
+    DataType,
+    LIST_TARGET_OPS,
+    Operation,
+)
 from .slots import (
     DEFAULT_SLOT_COUNT,
     SLOT_OPERATION,
@@ -69,14 +75,24 @@ class GFSLInstruction:
 
     @property
     def target_type(self) -> int:
-        if self.target_cat in (Category.VARIABLE, Category.CONSTANT):
+        if self.target_cat in (
+            Category.VARIABLE,
+            Category.CONSTANT,
+            Category.LIST,
+            Category.LIST_CONSTANT,
+        ):
             dtype, _ = unpack_type_index(self.target_spec)
             return dtype
         return int(DataType.NONE)
 
     @property
     def target_index(self) -> int:
-        if self.target_cat in (Category.VARIABLE, Category.CONSTANT):
+        if self.target_cat in (
+            Category.VARIABLE,
+            Category.CONSTANT,
+            Category.LIST,
+            Category.LIST_CONSTANT,
+        ):
             _, idx = unpack_type_index(self.target_spec)
             return idx
         return 0
@@ -95,16 +111,28 @@ class GFSLInstruction:
 
     @property
     def source1_type(self) -> int:
-        if self.source1_cat in (Category.VARIABLE, Category.CONSTANT):
+        if self.source1_cat in (
+            Category.VARIABLE,
+            Category.CONSTANT,
+            Category.LIST,
+            Category.LIST_CONSTANT,
+        ):
             dtype, _ = unpack_type_index(self.source1_spec)
             return dtype
         if self.source1_cat == Category.VALUE:
+            if self.operation in LIST_TARGET_OPS:
+                return self.target_type
             return infer_source_type(self.operation, 1)
         return int(DataType.NONE)
 
     @property
     def source1_value(self) -> int:
-        if self.source1_cat in (Category.VARIABLE, Category.CONSTANT):
+        if self.source1_cat in (
+            Category.VARIABLE,
+            Category.CONSTANT,
+            Category.LIST,
+            Category.LIST_CONSTANT,
+        ):
             _, idx = unpack_type_index(self.source1_spec)
             return idx
         if self.source1_cat in (Category.VALUE, Category.CONFIG):
@@ -121,7 +149,12 @@ class GFSLInstruction:
 
     @property
     def source2_type(self) -> int:
-        if self.source2_cat in (Category.VARIABLE, Category.CONSTANT):
+        if self.source2_cat in (
+            Category.VARIABLE,
+            Category.CONSTANT,
+            Category.LIST,
+            Category.LIST_CONSTANT,
+        ):
             dtype, _ = unpack_type_index(self.source2_spec)
             return dtype
         if self.source2_cat == Category.VALUE:
@@ -130,7 +163,12 @@ class GFSLInstruction:
 
     @property
     def source2_value(self) -> int:
-        if self.source2_cat in (Category.VARIABLE, Category.CONSTANT):
+        if self.source2_cat in (
+            Category.VARIABLE,
+            Category.CONSTANT,
+            Category.LIST,
+            Category.LIST_CONSTANT,
+        ):
             _, idx = unpack_type_index(self.source2_spec)
             return idx
         if self.source2_cat in (Category.VALUE, Category.CONFIG):
@@ -195,14 +233,24 @@ def describe_slot_option(instruction: GFSLInstruction, slot_index: int, value: i
 
         if cat == Category.NONE:
             return "NONE"
-        if cat in (Category.VARIABLE, Category.CONSTANT):
+        if cat in (
+            Category.VARIABLE,
+            Category.CONSTANT,
+            Category.LIST,
+            Category.LIST_CONSTANT,
+        ):
             dtype, idx = unpack_type_index(value)
             try:
                 dtype_enum = DataType(dtype)
                 prefix = dtype_enum.name[0].lower()
             except ValueError:
                 prefix = f"type{dtype}"
-            symbol = "$" if cat == Category.VARIABLE else "#"
+            symbol = {
+                Category.VARIABLE: "$",
+                Category.CONSTANT: "#",
+                Category.LIST: "!",
+                Category.LIST_CONSTANT: "!#",
+            }.get(cat, "?")
             return f"{prefix}{symbol}{idx}"
         if cat == Category.CONFIG:
             try:

@@ -17,6 +17,8 @@ from .values import ValueEnumerations
 class GFSLExecutor:
     """Executes GFSL genomes."""
 
+    VOID = object()
+
     def __init__(self):
         self.reset()
 
@@ -24,8 +26,30 @@ class GFSLExecutor:
         """Reset execution state."""
         self.variables = defaultdict(lambda: defaultdict(lambda: 0.0))
         self.constants = defaultdict(lambda: defaultdict(lambda: 0.0))
+        self.lists = defaultdict(lambda: defaultdict(list))
+        self.constant_lists = defaultdict(lambda: defaultdict(list))
         self.config_state = {}
         self.execution_trace = []
+
+    def _is_void(self, value: Any) -> bool:
+        return value is self.VOID
+
+    def _coerce_list_input(self, value: Any) -> list:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return list(value)
+        if isinstance(value, tuple):
+            return list(value)
+        if isinstance(value, np.ndarray):
+            converted = value.tolist()
+            return converted if isinstance(converted, list) else [converted]
+        if isinstance(value, (str, bytes, dict)):
+            return [value]
+        try:
+            return list(value)
+        except TypeError:
+            return [value]
 
     def _safe_float(self, val) -> float:
         """Safely convert value to float, handling complex numbers and errors."""
@@ -37,14 +61,14 @@ class GFSLExecutor:
             return 0.0
 
     def execute(
-        self, genome: GFSLGenome, inputs: Optional[Dict[str, float]] = None
-    ) -> Dict[str, float]:
+        self, genome: GFSLGenome, inputs: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """
         Execute genome and return outputs.
 
         Args:
             genome: The GFSL genome to execute
-            inputs: Optional input values as {"d$0": 5.0, "b$0": True, ...}
+            inputs: Optional input values as {"d$0": 5.0, "b$0": True, "d!0": [1, 2], ...}
         Returns:
             Dictionary of output values
         """
@@ -52,19 +76,35 @@ class GFSLExecutor:
 
         if inputs:
             for key, value in inputs.items():
-                dtype_char = key[0]
-                is_const = "#" in key
-                idx_str = key.split("$" if "$" in key else "#")[1]
+                dtype_char = key[0].lower()
+                if "!#" in key:
+                    cat = Category.LIST_CONSTANT
+                    idx_str = key.split("!#", 1)[1]
+                elif "!" in key:
+                    cat = Category.LIST
+                    idx_str = key.split("!", 1)[1]
+                elif "$" in key:
+                    cat = Category.VARIABLE
+                    idx_str = key.split("$", 1)[1]
+                elif "#" in key:
+                    cat = Category.CONSTANT
+                    idx_str = key.split("#", 1)[1]
+                else:
+                    continue
                 idx = int(idx_str)
 
-                dtype = {"b": DataType.BOOLEAN, "d": DataType.DECIMAL}.get(
+                dtype = {"b": DataType.BOOLEAN, "d": DataType.DECIMAL, "t": DataType.TENSOR}.get(
                     dtype_char, DataType.DECIMAL
                 )
 
-                if is_const:
+                if cat == Category.CONSTANT:
                     self.constants[dtype][idx] = value
-                else:
+                elif cat == Category.VARIABLE:
                     self.variables[dtype][idx] = value
+                elif cat == Category.LIST:
+                    self.lists[dtype][idx] = self._coerce_list_input(value)
+                elif cat == Category.LIST_CONSTANT:
+                    self.constant_lists[dtype][idx] = self._coerce_list_input(value)
 
         effective_indices = genome.extract_effective_algorithm()
 
@@ -76,10 +116,12 @@ class GFSLExecutor:
         for cat, dtype, idx in genome.outputs:
             if cat == Category.VARIABLE:
                 key = f"{DataType(dtype).name[0].lower()}${idx}"
-                outputs[key] = self.variables[dtype][idx]
+                value = self.variables[dtype][idx]
+                outputs[key] = None if self._is_void(value) else value
             elif cat == Category.CONSTANT:
                 key = f"{DataType(dtype).name[0].lower()}#{idx}"
-                outputs[key] = self.constants[dtype][idx]
+                value = self.constants[dtype][idx]
+                outputs[key] = None if self._is_void(value) else value
 
         return outputs
 
@@ -94,6 +136,11 @@ class GFSLExecutor:
 
         source1 = self._get_value(instr, 1)
         source2 = self._get_value(instr, 2)
+
+        if instr.source1_cat != Category.NONE and self._is_void(source1):
+            return
+        if instr.source2_cat != Category.NONE and self._is_void(source2):
+            return
 
         result = None
 
@@ -183,12 +230,47 @@ class GFSLExecutor:
             elif op == Operation.MOD:
                 s2 = self._safe_float(source2)
                 result = self._safe_float(source1) % s2 if s2 != 0 else 0.0
+            elif op == Operation.PREPEND:
+                target_list = self.lists[instr.target_type][instr.target_index]
+                target_list.insert(0, source1)
+                result = list(target_list)
+            elif op == Operation.APPEND:
+                target_list = self.lists[instr.target_type][instr.target_index]
+                target_list.append(source1)
+                result = list(target_list)
+            elif op == Operation.CLONE:
+                if isinstance(source1, list):
+                    result = list(source1)
+                else:
+                    result = []
+            elif op == Operation.FIFO:
+                if isinstance(source1, list) and source1:
+                    result = source1.pop(0)
+                else:
+                    result = self.VOID
+            elif op == Operation.FILO:
+                if isinstance(source1, list) and source1:
+                    result = source1.pop()
+                else:
+                    result = self.VOID
+            elif op == Operation.LISTCOUNT:
+                result = float(len(source1)) if isinstance(source1, list) else 0.0
+            elif op == Operation.LISTHASITEMS:
+                result = bool(source1) if isinstance(source1, list) else False
 
         if result is not None and instr.target_cat != Category.NONE:
             if instr.target_cat == Category.VARIABLE:
                 self.variables[instr.target_type][instr.target_index] = result
             elif instr.target_cat == Category.CONSTANT:
                 self.constants[instr.target_type][instr.target_index] = result
+            elif instr.target_cat == Category.LIST:
+                self.lists[instr.target_type][instr.target_index] = (
+                    list(result) if isinstance(result, list) else [result]
+                )
+            elif instr.target_cat == Category.LIST_CONSTANT:
+                self.constant_lists[instr.target_type][instr.target_index] = (
+                    list(result) if isinstance(result, list) else [result]
+                )
 
     def _get_value(self, instr: GFSLInstruction, source_num: int) -> Any:
         """Get value for a source."""
@@ -207,6 +289,10 @@ class GFSLExecutor:
             return self.variables[dtype][val]
         if cat == Category.CONSTANT:
             return self.constants[dtype][val]
+        if cat == Category.LIST:
+            return self.lists[dtype][val]
+        if cat == Category.LIST_CONSTANT:
+            return self.constant_lists[dtype][val]
         if cat == Category.VALUE:
             context = (instr.operation, None)
             if (

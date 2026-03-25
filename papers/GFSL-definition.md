@@ -322,6 +322,42 @@ For neural channels:
 For probabilities:
 - Enumeration: [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0]
 
+## Optional Typed Lists
+
+GFSL can optionally expose typed list references in addition to scalar variables/constants.
+
+Human-readable shorthand:
+- Mutable list: `<type>!<index>` (examples: `d!0`, `b!1`, `t!0`)
+- Constant list: `<type>!#<index>` (example: `d!#0`)
+
+Constant lists are **read-only list sources** and are intended only for cloning into normal mutable lists.
+
+### List Operations
+
+- `PREPEND`: `d!0 PREPEND d$1`
+- `APPEND`: `d!0 APPEND d$1`
+- `CLONE`: `b!1 CLONE b!0` or `b!1 CLONE b!#0`
+- `FIFO`: `d$2 FIFO d!0` (returns first item and removes it)
+- `FILO`: `d$2 FILO d!0` (returns last item and removes it)
+- `LISTCOUNT`: `d$2 LISTCOUNT b!0`
+- `LISTHASITEMS`: `b$1 LISTHASITEMS d!1`
+
+### Allocation and Validity
+
+- Lists do not require explicit declaration.
+- `PREPEND`/`APPEND` can target an `n+1` list index to create a new list.
+- `CLONE` is offered only if at least one compatible mutable list (`!`) or constant list (`!#`) exists.
+- `FIFO`/`FILO` are offered only if at least one compatible mutable list exists.
+- `LISTCOUNT`/`LISTHASITEMS` are offered only if at least one mutable list exists.
+- If only one compatible list type/category is available, subsequent slot options must be restricted to that available choice.
+
+### Empty List Pop and `VOID`
+
+When `FIFO` or `FILO` is applied to an empty mutable list, the returned value is `VOID`.
+
+Default execution rule: if a later instruction requires a source that is `VOID`, that instruction is skipped.
+This keeps runtime behavior deterministic while preserving the information that the pop did not produce a concrete value.
+
 ## Control Flow
 
 ### Structured Blocks
@@ -1337,6 +1373,8 @@ graph TD
 | 2 | CONSTANT | # | Immutable value |
 | 3 | VALUE | ! | From enumeration |
 | 4 | CONFIG | & | Configuration index |
+| 5 | LIST | ! (typed pointer form `<type>!<index>`) | Mutable typed list storage |
+| 6 | LIST_CONSTANT | !# (typed pointer form `<type>!#<index>`) | Read-only typed list source |
 
 ## Context-Dependent Value Enumerations
 
@@ -1650,6 +1688,8 @@ graph TD
 | 2 | CONSTANT | # | Immutable value |
 | 3 | VALUE | ! | From enumeration |
 | 4 | CONFIG | & | Configuration index |
+| 5 | LIST | ! (typed pointer form `<type>!<index>`) | Mutable typed list storage |
+| 6 | LIST_CONSTANT | !# (typed pointer form `<type>!#<index>`) | Read-only typed list source |
 
 ## Context-Dependent Value Enumerations
 

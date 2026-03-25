@@ -115,6 +115,12 @@ class GFSLGenome:
         self.outputs.append((Category.VARIABLE, var_type, var_index))
         self._effective_instructions = None
 
+    def seed_list_count(
+        self, dtype: DataType, count: int, *, constant: bool = False
+    ) -> None:
+        """Seed known pre-existing list counts for validator option generation."""
+        self.validator.seed_list_count(dtype, count, constant=constant)
+
     def set_instruction_weight(self, instruction_index: int, weight: Optional[float]) -> None:
         """Assign or clear an explicit weight for a single instruction."""
         if instruction_index < 0 or instruction_index >= len(self.instructions):
@@ -170,7 +176,12 @@ class GFSLGenome:
                 )
                 producers[target_key] = idx
 
-            if instr.source1_cat in (Category.VARIABLE, Category.CONSTANT):
+            if instr.source1_cat in (
+                Category.VARIABLE,
+                Category.CONSTANT,
+                Category.LIST,
+                Category.LIST_CONSTANT,
+            ):
                 source_key = (
                     int(instr.source1_cat),
                     int(instr.source1_type),
@@ -179,7 +190,12 @@ class GFSLGenome:
                 if source_key in producers:
                     dependencies[idx].add(producers[source_key])
 
-            if instr.source2_cat in (Category.VARIABLE, Category.CONSTANT):
+            if instr.source2_cat in (
+                Category.VARIABLE,
+                Category.CONSTANT,
+                Category.LIST,
+                Category.LIST_CONSTANT,
+            ):
                 source_key = (
                     int(instr.source2_cat),
                     int(instr.source2_type),
@@ -210,15 +226,21 @@ class GFSLGenome:
             text = ref.strip()
             if not text:
                 raise ValueError("Result reference string is empty.")
-            if "$" in text:
+            if "!#" in text:
+                dtype_char, idx_str = text.split("!#", 1)
+                cat = Category.LIST_CONSTANT
+            elif "$" in text:
                 dtype_char, idx_str = text.split("$", 1)
                 cat = Category.VARIABLE
             elif "#" in text:
                 dtype_char, idx_str = text.split("#", 1)
                 cat = Category.CONSTANT
+            elif "!" in text:
+                dtype_char, idx_str = text.split("!", 1)
+                cat = Category.LIST
             else:
                 raise ValueError(
-                    f"Result reference '{ref}' must include '$' or '#'."
+                    f"Result reference '{ref}' must include '$', '#', '!' or '!#'."
                 )
             dtype_map = {
                 "b": DataType.BOOLEAN,
@@ -251,8 +273,15 @@ class GFSLGenome:
             raise ValueError("Result references must include dtype and index.")
 
         cat_enum = Category(cat)
-        if cat_enum not in (Category.VARIABLE, Category.CONSTANT):
-            raise ValueError("Result references must target a variable or constant.")
+        if cat_enum not in (
+            Category.VARIABLE,
+            Category.CONSTANT,
+            Category.LIST,
+            Category.LIST_CONSTANT,
+        ):
+            raise ValueError(
+                "Result references must target a variable, constant, list, or constant list."
+            )
         return int(cat_enum), int(DataType(dtype)), int(index)
 
     def _normalize_result_references(self, result_refs: Any) -> List[Tuple[int, int, int]]:
@@ -470,6 +499,10 @@ class GFSLGenome:
             return f"{dtype.name[0].lower()}${idx}"
         if cat == Category.CONSTANT:
             return f"{dtype.name[0].lower()}#{idx}"
+        if cat == Category.LIST:
+            return f"{dtype.name[0].lower()}!{idx}"
+        if cat == Category.LIST_CONSTANT:
+            return f"{dtype.name[0].lower()}!#{idx}"
         return "NONE"
 
     def _decode_source(self, instr: GFSLInstruction, source_num: int) -> str:
@@ -489,6 +522,10 @@ class GFSLGenome:
             return f"{dtype.name[0].lower()}${val}"
         if cat == Category.CONSTANT:
             return f"{dtype.name[0].lower()}#{val}"
+        if cat == Category.LIST:
+            return f"{dtype.name[0].lower()}!{val}"
+        if cat == Category.LIST_CONSTANT:
+            return f"{dtype.name[0].lower()}!#{val}"
         if cat == Category.VALUE:
             context = (instr.operation, None)
             if (
