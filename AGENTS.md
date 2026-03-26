@@ -26,6 +26,10 @@ Quick guidance for AI assistants working in this repository.
   - `supervised.py` - GFSLFeatureExtractor + GFSLSupervisedGuide.
   - `demos.py` - example_formula_discovery + example_neural_architecture_search.
 - `example.py` and `examples/` scripts auto-insert `src/` into `sys.path` for local runs.
+- Function-focused smoke demos:
+  - `examples/function_flow.py` - typed function call + activity-based pruning.
+  - `examples/nested_function_flow.py` - nested function execution (enabled/disabled comparison).
+  - `examples/void_external_write_flow.py` - void function external-write policy behavior.
 
 ## Usage notes
 - When running ad-hoc scripts from the repo, set `PYTHONPATH=src` or use the provided scripts that bootstrap the path.
@@ -81,8 +85,12 @@ Quick guidance for AI assistants working in this repository.
   - `rebuild_validator_state()` is available to recompute validator counters after bulk edits.
 
 ## Suggested verification
-- No automated test suite; run `python3 example.py function` and `python3 examples/*.py` for smoke coverage.
+- No automated test suite; run:
+  - `python3 example.py function`
+  - `python3 example.py nested`
+  - `python3 example.py void`
+  - `python3 examples/*.py`
 
 ## Roadmap / next steps
 - Operation conversion table (map ops to alternatives per device profile using weights).
-- Add a dedicated nested-function smoke example and one void-function + external-write example.
+- Add recursion-guard stress tests (`max_call_depth`) and activity-pruning policy sweeps.

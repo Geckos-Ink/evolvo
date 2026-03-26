@@ -94,6 +94,10 @@ The demo:
 > Want to see runtime personalization instead? Run `python example.py personalization` to register and execute a bespoke decimal operation.
 >
 > Want to see functions + pruning flow? Run `python example.py function`.
+>
+> Nested functions smoke demo: `python example.py nested`
+>
+> Void function external-write smoke demo: `python example.py void`
 
 If you prefer to start from scratch, the minimal API looks like:
 
@@ -134,6 +138,8 @@ Practical scripts live in `examples/`:
 - `examples/neural_flow.py` — SET/CONV neural flow with a consequent RELU.
 - `examples/operation_extraction.py` — dependency-based extraction for specific result references.
 - `examples/function_flow.py` — typed function declaration/call plus activity-based stale-instruction pruning.
+- `examples/nested_function_flow.py` — nested function behavior (`allow_nested_functions=True/False`) side-by-side.
+- `examples/void_external_write_flow.py` — void function behavior with isolated scope vs. external writes.
 
 ---
 
