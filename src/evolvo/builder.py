@@ -149,6 +149,9 @@ class GFSLExpressionBuilder:
     def target_list(self, dtype: Union[DataType, int], index: int) -> "GFSLExpressionBuilder":
         return self.target(Category.LIST, dtype=dtype, index=index)
 
+    def target_function(self, dtype: Union[DataType, int], index: int) -> "GFSLExpressionBuilder":
+        return self.target(Category.FUNCTION, dtype=dtype, index=index)
+
     def target_none(self) -> "GFSLExpressionBuilder":
         return self.target(Category.NONE)
 
@@ -173,6 +176,9 @@ class GFSLExpressionBuilder:
         category = Category.LIST_CONSTANT if constant else Category.LIST
         return self.source1(category, pack_type_index(dtype, index))
 
+    def source1_function(self, dtype: Union[DataType, int], index: int) -> "GFSLExpressionBuilder":
+        return self.source1(Category.FUNCTION, pack_type_index(dtype, index))
+
     def source1_value_index(self, index: int) -> "GFSLExpressionBuilder":
         return self.source1(Category.VALUE, int(index))
 
@@ -196,6 +202,9 @@ class GFSLExpressionBuilder:
     ) -> "GFSLExpressionBuilder":
         category = Category.LIST_CONSTANT if constant else Category.LIST
         return self.source2(category, pack_type_index(dtype, index))
+
+    def source2_function(self, dtype: Union[DataType, int], index: int) -> "GFSLExpressionBuilder":
+        return self.source2(Category.FUNCTION, pack_type_index(dtype, index))
 
     def source2_value_index(self, index: int) -> "GFSLExpressionBuilder":
         return self.source2(Category.VALUE, int(index))

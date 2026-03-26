@@ -299,6 +299,8 @@ def infer_source_type(op_code: int, source_index: int) -> int:
         return int(DataType.BOOLEAN)
     if op in (Operation.IF, Operation.WHILE):
         return int(DataType.BOOLEAN)
+    if op == Operation.CALL:
+        return int(DataType.NONE)
     if op in LIST_TARGET_OPS or op in LIST_VALUE_OPS:
         return int(DataType.NONE)
     if op in LIST_QUERY_OPS:

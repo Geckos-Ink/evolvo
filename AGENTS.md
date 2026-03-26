@@ -34,9 +34,16 @@ Quick guidance for AI assistants working in this repository.
 - Typed list pointers are supported:
   - Mutable list: `d!0`, `b!1`, `t!0` (`Category.LIST`)
   - Constant list: `d!#0` (`Category.LIST_CONSTANT`, clone-only source)
+- Typed function pointers are supported:
+  - Function reference: `d&0`, `b&1`, `t&0`, `n&0` (`Category.FUNCTION`)
+  - `n&*` represents a void function (`DataType.NONE` return).
 - Operation weights are optional metadata: `GFSLInstruction.weight` or `GFSLGenome.set_instruction_weights(...)` for
   per-instruction groups, and `GFSLGenome.operation_weights` (OperationWeights) for per-op/group weighting; weights do not
   affect execution/signatures.
+- Instruction activity tracking is built into the runtime:
+  - `GFSLExecutor.execute(...)` records executed instruction hits on `GFSLGenome.instruction_activity`.
+  - Use `GFSLGenome.record_instruction_activity(...)`, `active_instruction_count(...)`,
+    `stale_instruction_indices(...)`, and `prune_stale_instructions(...)` for usage-aware cleanup.
 
 ## Optional dependencies
 - `torch` (including `torch.nn`, `torch.nn.functional`, and `torch.optim`) is optional. The supervised guidance stack (`src/evolvo/supervised.py`), the neural model builder (`src/evolvo/model.py`), GPU-aware demos, and the provided example scripts now raise informative errors when PyTorch is missing so the rest of the library can be imported with only NumPy installed.
@@ -45,6 +52,7 @@ Quick guidance for AI assistants working in this repository.
 - Instruction layout: fixed per genome, default is 7 slots (2-slot address + op + 2-slot address + 2-slot address), auto-sized to the maximum declared expression length.
 - Slot order: target_cat, target_spec, op, source1_cat, source1_spec, source2_cat, source2_spec.
 - Address encoding: use `pack_type_index` and `unpack_type_index` for variable/constant/list slots.
+- Function references use the same packed address format and the `&` symbol (`Category.FUNCTION`).
 - Slot sizing: `GFSLInstruction` infers slot count from the provided list; `GFSLGenome` auto-expands to the max length.
 - Fixed sizing: pass `auto_slot_count=False` or `slot_count=...` on `GFSLGenome` to lock the size.
 - Validity rules: always use `SlotValidator.get_valid_options` and prefer `SlotValidator.choose_option` or
@@ -52,6 +60,11 @@ Quick guidance for AI assistants working in this repository.
 - Probability support: `SlotValidator.option_success_probabilities` and `SlotValidator.build_probability_tree`
   provide success likelihoods per option.
 - SET operations: source1 is CONFIG property, source2 is VALUE from the property-specific enumeration.
+- Function operations:
+  - Declaration: `<type>&<index> FUNC` opens a function scope.
+  - Return/close: `END <type>$<index>` for non-void returns, `END n#0` (or `END NONE`) for void.
+  - Call: `<type>$<dst> CALL <type>&<index>` assigns function output; `NONE CALL n&<index>` is valid for void functions.
+  - Nested declarations are supported by the executor (toggle via `GFSLExecutor(allow_nested_functions=...)`).
 - List operations:
   - `PREPEND` / `APPEND` target a typed list and insert source1.
   - `CLONE` copies from mutable list (`!`) or constant list (`!#`) into a mutable target list.
@@ -63,10 +76,13 @@ Quick guidance for AI assistants working in this repository.
   - `FIFO`/`FILO` appear only when at least one compatible mutable list exists.
   - `LISTCOUNT`/`LISTHASITEMS` appear only when at least one mutable list exists.
   - `seed_list_count(dtype, count, constant=...)` can expose pre-existing runtime lists to option generation.
+- Activity-aware pruning:
+  - `prune_stale_instructions(min_hits=..., max_idle_ticks=..., keep_effective=True)` removes stale instructions while preserving currently effective ones by default.
+  - `rebuild_validator_state()` is available to recompute validator counters after bulk edits.
 
 ## Suggested verification
-- No automated test suite; run `python example.py` and `python examples/*.py` for smoke coverage.
+- No automated test suite; run `python3 example.py function` and `python3 examples/*.py` for smoke coverage.
 
 ## Roadmap / next steps
 - Operation conversion table (map ops to alternatives per device profile using weights).
-- Add list-oriented smoke examples in `examples/` (queue/stack and constant-list cloning).
+- Add a dedicated nested-function smoke example and one void-function + external-write example.

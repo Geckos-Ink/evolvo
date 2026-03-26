@@ -52,7 +52,9 @@ class SlotValidator:
         self.constant_counts = defaultdict(int)
         self.list_counts = defaultdict(int)
         self.constant_list_counts = defaultdict(int)
+        self.function_counts = defaultdict(int)
         self.scope_depth = 0
+        self.scope_stack: List[Tuple[str, Optional[DataType]]] = []
         self.config_state = {}
 
     def activate_type(self, dtype: DataType):
@@ -112,6 +114,8 @@ class SlotValidator:
             return self.list_counts
         if category == Category.LIST_CONSTANT:
             return self.constant_list_counts
+        if category == Category.FUNCTION:
+            return self.function_counts
         return None
 
     def _target_dtype(self, instruction: GFSLInstruction) -> Optional[DataType]:
@@ -122,12 +126,30 @@ class SlotValidator:
             Category.CONSTANT,
             Category.LIST,
             Category.LIST_CONSTANT,
+            Category.FUNCTION,
         ):
             target_type, _ = unpack_type_index(target_spec)
             try:
                 return DataType(target_type)
             except ValueError:
                 return None
+        return None
+
+    def _function_return_types(self) -> List[DataType]:
+        return sorted(self.active_types | {DataType.NONE})
+
+    def _has_functions(self, dtype: DataType) -> bool:
+        return self.function_counts[int(dtype)] > 0
+
+    def _current_scope_kind(self) -> Optional[str]:
+        if not self.scope_stack:
+            return None
+        return self.scope_stack[-1][0]
+
+    def _current_function_return_dtype(self) -> Optional[DataType]:
+        for kind, return_dtype in reversed(self.scope_stack):
+            if kind == "FUNC":
+                return return_dtype
         return None
 
     def _has_scalar_source_for_dtype(self, dtype: DataType) -> bool:
@@ -175,7 +197,13 @@ class SlotValidator:
             return []
 
         if slot_index == SLOT_TARGET_CAT:
-            return [Category.NONE, Category.VARIABLE, Category.CONSTANT, Category.LIST]
+            return [
+                Category.NONE,
+                Category.VARIABLE,
+                Category.CONSTANT,
+                Category.LIST,
+                Category.FUNCTION,
+            ]
 
         if slot_index == SLOT_TARGET_SPEC:
             target_cat = instruction.slot_value(SLOT_TARGET_CAT)
@@ -190,6 +218,8 @@ class SlotValidator:
                 )
             if target_cat == Category.LIST:
                 return self._alloc_specifiers(Category.LIST, sorted(self.active_types))
+            if target_cat == Category.FUNCTION:
+                return self._alloc_specifiers(Category.FUNCTION, self._function_return_types())
             return []
 
         if slot_index == SLOT_OPERATION:
@@ -201,6 +231,7 @@ class SlotValidator:
                 Category.CONSTANT,
                 Category.LIST,
                 Category.LIST_CONSTANT,
+                Category.FUNCTION,
             ):
                 target_type, _ = unpack_type_index(target_spec)
 
@@ -218,7 +249,11 @@ class SlotValidator:
                 custom_codes = custom_operations.codes_for_target(dtype_enum)
 
             if target_cat == Category.NONE:
-                valid_ops = CONTROL_FLOW_OPS
+                valid_ops = [op for op in CONTROL_FLOW_OPS if op != Operation.FUNC]
+                if self._has_functions(DataType.NONE):
+                    valid_ops.append(Operation.CALL)
+            elif target_cat == Category.FUNCTION:
+                valid_ops = [Operation.FUNC]
             elif target_cat == Category.LIST and dtype_enum != DataType.NONE:
                 if self._has_scalar_source_for_dtype(dtype_enum):
                     valid_ops.extend([Operation.PREPEND, Operation.APPEND])
@@ -241,6 +276,13 @@ class SlotValidator:
                 if self._has_lists(dtype_enum):
                     valid_ops.extend(LIST_VALUE_OPS)
 
+            if (
+                target_cat in (Category.VARIABLE, Category.CONSTANT)
+                and dtype_enum != DataType.NONE
+                and self._has_functions(dtype_enum)
+            ):
+                valid_ops.append(Operation.CALL)
+
             result_ops = [int(op) for op in valid_ops]
             result_ops.extend(custom_codes)
             return result_ops
@@ -256,7 +298,16 @@ class SlotValidator:
                 return [int(cat) for cat in allowed]
 
             if op == Operation.END:
+                if self._current_scope_kind() != "FUNC":
+                    return [Category.NONE]
+                return_dtype = self._current_function_return_dtype() or DataType.NONE
+                if return_dtype == DataType.NONE:
+                    return [Category.NONE, Category.CONSTANT]
+                return [Category.VARIABLE]
+            if op == Operation.FUNC:
                 return [Category.NONE]
+            if op == Operation.CALL:
+                return [Category.FUNCTION]
             if op == Operation.SET:
                 return [Category.CONFIG]
             if op == Operation.RESULT:
@@ -299,6 +350,31 @@ class SlotValidator:
                 if dtype is None:
                     return []
                 return self._existing_specifiers(source1_cat, dtype)
+
+            if op == Operation.END:
+                if self._current_scope_kind() != "FUNC":
+                    return [0] if source1_cat == Category.NONE else []
+                return_dtype = self._current_function_return_dtype() or DataType.NONE
+                if source1_cat == Category.NONE:
+                    return [0]
+                if source1_cat == Category.VARIABLE:
+                    if return_dtype == DataType.NONE:
+                        return []
+                    return self._existing_specifiers(Category.VARIABLE, return_dtype)
+                if source1_cat == Category.CONSTANT and return_dtype == DataType.NONE:
+                    return [pack_type_index(DataType.NONE, 0)]
+                return []
+
+            if source1_cat == Category.FUNCTION:
+                if op != Operation.CALL:
+                    return []
+                target_cat = instruction.slot_value(SLOT_TARGET_CAT)
+                if target_cat == Category.NONE:
+                    return self._existing_specifiers(Category.FUNCTION, DataType.NONE)
+                target_dtype = self._target_dtype(instruction)
+                if target_dtype is None:
+                    return []
+                return self._existing_specifiers(Category.FUNCTION, target_dtype)
 
             if source1_cat == Category.CONFIG:
                 if op == Operation.SET:
@@ -350,6 +426,8 @@ class SlotValidator:
                     return []
                 return [int(cat) for cat in allowed]
 
+            if op in (Operation.FUNC, Operation.CALL, Operation.END):
+                return [Category.NONE]
             if op in LIST_TARGET_OPS or op in LIST_VALUE_OPS or op in LIST_QUERY_OPS:
                 return [Category.NONE]
             if op == Operation.SET:
@@ -545,11 +623,22 @@ class SlotValidator:
         elif target_cat == Category.LIST_CONSTANT:
             if target_index >= self.constant_list_counts[target_type]:
                 self.constant_list_counts[target_type] = target_index + 1
+        elif target_cat == Category.FUNCTION:
+            if target_index >= self.function_counts[target_type]:
+                self.function_counts[target_type] = target_index + 1
 
         if op == Operation.IF or op == Operation.WHILE:
-            self.scope_depth += 1
+            self.scope_stack.append(("BLOCK", None))
+        elif op == Operation.FUNC:
+            try:
+                return_dtype = DataType(target_type)
+            except ValueError:
+                return_dtype = DataType.NONE
+            self.scope_stack.append(("FUNC", return_dtype))
         elif op == Operation.END:
-            self.scope_depth = max(0, self.scope_depth - 1)
+            if self.scope_stack:
+                self.scope_stack.pop()
+        self.scope_depth = len(self.scope_stack)
 
         if op == Operation.SET:
             prop_value = instruction.source1_value

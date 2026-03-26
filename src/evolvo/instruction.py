@@ -80,6 +80,7 @@ class GFSLInstruction:
             Category.CONSTANT,
             Category.LIST,
             Category.LIST_CONSTANT,
+            Category.FUNCTION,
         ):
             dtype, _ = unpack_type_index(self.target_spec)
             return dtype
@@ -92,6 +93,7 @@ class GFSLInstruction:
             Category.CONSTANT,
             Category.LIST,
             Category.LIST_CONSTANT,
+            Category.FUNCTION,
         ):
             _, idx = unpack_type_index(self.target_spec)
             return idx
@@ -116,6 +118,7 @@ class GFSLInstruction:
             Category.CONSTANT,
             Category.LIST,
             Category.LIST_CONSTANT,
+            Category.FUNCTION,
         ):
             dtype, _ = unpack_type_index(self.source1_spec)
             return dtype
@@ -132,6 +135,7 @@ class GFSLInstruction:
             Category.CONSTANT,
             Category.LIST,
             Category.LIST_CONSTANT,
+            Category.FUNCTION,
         ):
             _, idx = unpack_type_index(self.source1_spec)
             return idx
@@ -154,6 +158,7 @@ class GFSLInstruction:
             Category.CONSTANT,
             Category.LIST,
             Category.LIST_CONSTANT,
+            Category.FUNCTION,
         ):
             dtype, _ = unpack_type_index(self.source2_spec)
             return dtype
@@ -168,6 +173,7 @@ class GFSLInstruction:
             Category.CONSTANT,
             Category.LIST,
             Category.LIST_CONSTANT,
+            Category.FUNCTION,
         ):
             _, idx = unpack_type_index(self.source2_spec)
             return idx
@@ -238,6 +244,7 @@ def describe_slot_option(instruction: GFSLInstruction, slot_index: int, value: i
             Category.CONSTANT,
             Category.LIST,
             Category.LIST_CONSTANT,
+            Category.FUNCTION,
         ):
             dtype, idx = unpack_type_index(value)
             try:
@@ -250,6 +257,7 @@ def describe_slot_option(instruction: GFSLInstruction, slot_index: int, value: i
                 Category.CONSTANT: "#",
                 Category.LIST: "!",
                 Category.LIST_CONSTANT: "!#",
+                Category.FUNCTION: "&",
             }.get(cat, "?")
             return f"{prefix}{symbol}{idx}"
         if cat == Category.CONFIG:

@@ -50,8 +50,8 @@ from .instruction import GFSLInstruction, SlotOption, describe_slot_option
 from .weights import OperationWeights
 from .validator import SlotValidator
 from .builder import GFSLExpressionBuilder
-from .genome import GFSLGenome
-from .executor import GFSLExecutor
+from .genome import GFSLGenome, InstructionActivity
+from .executor import GFSLExecutor, FunctionDefinition
 from .evaluator import RealTimeEvaluator
 from .model import RecursiveModelBuilder
 from .evolver import GFSLEvolver
@@ -110,7 +110,9 @@ __all__ = [
     "describe_slot_option",
     "SlotValidator",
     "GFSLExpressionBuilder",
+    "InstructionActivity",
     "GFSLGenome",
+    "FunctionDefinition",
     "GFSLExecutor",
     "RealTimeEvaluator",
     "RecursiveModelBuilder",

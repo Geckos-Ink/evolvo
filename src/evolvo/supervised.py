@@ -92,9 +92,9 @@ class GFSLFeatureExtractor:
             if op is not None:
                 operation_counts[op] += 1
 
-                if op in (Operation.IF, Operation.WHILE, Operation.END):
+                if op in (Operation.IF, Operation.WHILE, Operation.END, Operation.FUNC):
                     control_flow += 1
-                if op in (Operation.IF, Operation.WHILE):
+                if op in (Operation.IF, Operation.WHILE, Operation.FUNC):
                     depth += 1
                     if depth > max_depth_seen:
                         max_depth_seen = depth

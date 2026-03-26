@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import heapq
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from .builder import GFSLExpressionBuilder
@@ -15,6 +16,14 @@ from .slots import DEFAULT_SLOT_COUNT
 from .validator import SlotValidator
 from .values import ValueEnumerations
 from .weights import OperationWeights
+
+
+@dataclass
+class InstructionActivity:
+    """Execution activity metadata for a genome instruction."""
+
+    hits: int = 0
+    last_active_tick: Optional[int] = None
 
 
 class GFSLGenome:
@@ -41,6 +50,8 @@ class GFSLGenome:
         self._signature: Optional[str] = None
         self._effective_instructions: Optional[List[int]] = None
         self.operation_weights = OperationWeights()
+        self.instruction_activity: List[InstructionActivity] = []
+        self.activity_tick: int = 0
 
     def expression(self) -> GFSLExpressionBuilder:
         """Create a slot-wise instruction builder bound to this genome."""
@@ -52,6 +63,30 @@ class GFSLGenome:
         for instr in self.instructions:
             instr.pad_to(slot_count)
         self.validator.slot_count = slot_count
+
+    def _ensure_activity_size(self) -> None:
+        while len(self.instruction_activity) < len(self.instructions):
+            self.instruction_activity.append(InstructionActivity())
+        if len(self.instruction_activity) > len(self.instructions):
+            self.instruction_activity = self.instruction_activity[: len(self.instructions)]
+
+    def rebuild_validator_state(self) -> None:
+        """Rebuild validator counters/scopes from the current instruction list."""
+        slot_count = self.validator.slot_count
+        active_types = set(self.validator.active_types)
+        if self.instructions:
+            slot_count = max(slot_count, max(len(instr.slots) for instr in self.instructions))
+
+        new_validator = SlotValidator(slot_count=slot_count)
+        new_validator.active_types = active_types
+        for instr in self.instructions:
+            if len(instr.slots) < slot_count:
+                instr.pad_to(slot_count)
+            new_validator.update_state(instr)
+        self.validator = new_validator
+        self._signature = None
+        self._effective_instructions = None
+        self._ensure_activity_size()
 
     def add_instruction_interactive(self, max_attempts: int = 25) -> GFSLInstruction:
         """
@@ -74,6 +109,7 @@ class GFSLGenome:
 
             self.instructions.append(instruction)
             self.validator.update_state(instruction)
+            self.instruction_activity.append(InstructionActivity())
             self._signature = None
             self._effective_instructions = None
 
@@ -105,6 +141,7 @@ class GFSLGenome:
 
         self.instructions.append(instr_copy)
         self.validator.update_state(instr_copy)
+        self.instruction_activity.append(InstructionActivity())
         self._signature = None
         self._effective_instructions = None
 
@@ -160,15 +197,192 @@ class GFSLGenome:
             group_reduce=group_reduce,
         )
 
+    def record_instruction_activity(
+        self,
+        instruction_indices: Iterable[int],
+        *,
+        tick: Optional[int] = None,
+    ) -> None:
+        """
+        Record runtime activity for instruction indices.
+
+        Activity is tracked as execution hits plus the last activity tick.
+        """
+        self._ensure_activity_size()
+        if tick is None:
+            self.activity_tick += 1
+            active_tick = self.activity_tick
+        else:
+            active_tick = int(tick)
+            self.activity_tick = max(self.activity_tick, active_tick)
+
+        for idx in set(int(i) for i in instruction_indices):
+            if idx < 0 or idx >= len(self.instructions):
+                continue
+            activity = self.instruction_activity[idx]
+            activity.hits += 1
+            activity.last_active_tick = active_tick
+
+    def active_instruction_count(
+        self,
+        *,
+        min_hits: int = 1,
+        max_idle_ticks: Optional[int] = None,
+        current_tick: Optional[int] = None,
+    ) -> int:
+        """Return how many instructions are currently considered active."""
+        stale = set(
+            self.stale_instruction_indices(
+                min_hits=min_hits,
+                max_idle_ticks=max_idle_ticks,
+                current_tick=current_tick,
+                include_never_used=True,
+                keep_effective=False,
+            )
+        )
+        return len(self.instructions) - len(stale)
+
+    def stale_instruction_indices(
+        self,
+        *,
+        min_hits: int = 1,
+        max_idle_ticks: Optional[int] = None,
+        current_tick: Optional[int] = None,
+        include_never_used: bool = True,
+        keep_effective: bool = True,
+    ) -> List[int]:
+        """
+        Return instruction indices that are stale by usage/recency policy.
+
+        Args:
+            min_hits: Minimum total executions required to stay active.
+            max_idle_ticks: Optional maximum age since last use.
+            current_tick: Optional reference tick; defaults to the latest known tick.
+            include_never_used: If true, consider never-used instructions as stale.
+            keep_effective: If true, never return currently effective instructions.
+        """
+        self._ensure_activity_size()
+        now = self.activity_tick if current_tick is None else int(current_tick)
+        effective = set(self.extract_effective_algorithm()) if keep_effective else set()
+        stale: List[int] = []
+
+        for idx, activity in enumerate(self.instruction_activity):
+            if idx in effective:
+                continue
+
+            if activity.hits < int(min_hits):
+                if include_never_used or activity.hits > 0:
+                    stale.append(idx)
+                continue
+
+            if max_idle_ticks is None:
+                continue
+
+            if activity.last_active_tick is None:
+                if include_never_used:
+                    stale.append(idx)
+                continue
+
+            if now - activity.last_active_tick > int(max_idle_ticks):
+                stale.append(idx)
+
+        return sorted(set(stale))
+
+    def prune_stale_instructions(
+        self,
+        *,
+        min_hits: int = 1,
+        max_idle_ticks: Optional[int] = None,
+        current_tick: Optional[int] = None,
+        include_never_used: bool = True,
+        keep_effective: bool = True,
+        max_pruned: Optional[int] = None,
+    ) -> List[int]:
+        """
+        Remove stale instructions and return the removed original indices.
+        """
+        stale = self.stale_instruction_indices(
+            min_hits=min_hits,
+            max_idle_ticks=max_idle_ticks,
+            current_tick=current_tick,
+            include_never_used=include_never_used,
+            keep_effective=keep_effective,
+        )
+        if not stale:
+            return []
+
+        if max_pruned is not None and max_pruned >= 0:
+            stale = stale[: int(max_pruned)]
+
+        stale_set = set(stale)
+        self.instructions = [
+            instr for idx, instr in enumerate(self.instructions) if idx not in stale_set
+        ]
+        self.instruction_activity = [
+            info for idx, info in enumerate(self.instruction_activity) if idx not in stale_set
+        ]
+        self.rebuild_validator_state()
+        return stale
+
+    def _collect_function_blocks(self) -> Dict[Tuple[int, int, int], Tuple[int, int]]:
+        """Return function ref -> (start_idx, end_idx) for declared function blocks."""
+        blocks: Dict[Tuple[int, int, int], Tuple[int, int]] = {}
+        stack: List[Tuple[str, Optional[Tuple[int, int, int]], int]] = []
+
+        for idx, instr in enumerate(self.instructions):
+            op_code = instr.operation
+            if (
+                op_code == Operation.FUNC
+                and instr.target_cat == Category.FUNCTION
+            ):
+                key = (
+                    int(Category.FUNCTION),
+                    int(instr.target_type),
+                    int(instr.target_index),
+                )
+                stack.append(("FUNC", key, idx))
+            elif op_code in (Operation.IF, Operation.WHILE):
+                stack.append(("BLOCK", None, idx))
+            elif op_code == Operation.END and stack:
+                kind, key, start_idx = stack.pop()
+                if kind == "FUNC" and key is not None:
+                    blocks[key] = (start_idx, idx)
+
+        return blocks
+
     def _build_dependency_graph(
         self,
     ) -> Tuple[Dict[int, Set[int]], Dict[Tuple[int, int, int], int]]:
         """Build data dependency graph and latest producers by target address."""
         dependencies: Dict[int, Set[int]] = defaultdict(set)
         producers: Dict[Tuple[int, int, int], int] = {}
+        function_blocks = self._collect_function_blocks()
+        function_start_indices = {start for start, _ in function_blocks.values()}
+        function_body_indices: Set[int] = set()
+        function_block_targets: Dict[Tuple[int, int, int], Set[Tuple[int, int, int]]] = {}
+
+        for function_key, (start_idx, end_idx) in function_blocks.items():
+            body_targets: Set[Tuple[int, int, int]] = set()
+            function_body_indices.update(range(start_idx + 1, end_idx + 1))
+            for body_idx in range(start_idx + 1, end_idx):
+                if body_idx >= len(self.instructions):
+                    continue
+                body_instr = self.instructions[body_idx]
+                if body_instr.target_cat == Category.NONE:
+                    continue
+                body_targets.add(
+                    (
+                        int(body_instr.target_cat),
+                        int(body_instr.target_type),
+                        int(body_instr.target_index),
+                    )
+                )
+            function_block_targets[function_key] = body_targets
 
         for idx, instr in enumerate(self.instructions):
-            if instr.target_cat != Category.NONE:
+            inside_function_body = idx in function_body_indices and idx not in function_start_indices
+
+            if not inside_function_body and instr.target_cat != Category.NONE:
                 target_key = (
                     int(instr.target_cat),
                     int(instr.target_type),
@@ -176,33 +390,56 @@ class GFSLGenome:
                 )
                 producers[target_key] = idx
 
-            if instr.source1_cat in (
-                Category.VARIABLE,
-                Category.CONSTANT,
-                Category.LIST,
-                Category.LIST_CONSTANT,
+            if not inside_function_body:
+                if instr.source1_cat in (
+                    Category.VARIABLE,
+                    Category.CONSTANT,
+                    Category.LIST,
+                    Category.LIST_CONSTANT,
+                    Category.FUNCTION,
+                ):
+                    source_key = (
+                        int(instr.source1_cat),
+                        int(instr.source1_type),
+                        int(instr.source1_value),
+                    )
+                    if source_key in producers:
+                        dependencies[idx].add(producers[source_key])
+
+                if instr.source2_cat in (
+                    Category.VARIABLE,
+                    Category.CONSTANT,
+                    Category.LIST,
+                    Category.LIST_CONSTANT,
+                    Category.FUNCTION,
+                ):
+                    source_key = (
+                        int(instr.source2_cat),
+                        int(instr.source2_type),
+                        int(instr.source2_value),
+                    )
+                    if source_key in producers:
+                        dependencies[idx].add(producers[source_key])
+
+            if (
+                not inside_function_body
+                and
+                instr.operation == Operation.CALL
+                and instr.source1_cat == Category.FUNCTION
             ):
-                source_key = (
-                    int(instr.source1_cat),
+                function_key = (
+                    int(Category.FUNCTION),
                     int(instr.source1_type),
                     int(instr.source1_value),
                 )
-                if source_key in producers:
-                    dependencies[idx].add(producers[source_key])
-
-            if instr.source2_cat in (
-                Category.VARIABLE,
-                Category.CONSTANT,
-                Category.LIST,
-                Category.LIST_CONSTANT,
-            ):
-                source_key = (
-                    int(instr.source2_cat),
-                    int(instr.source2_type),
-                    int(instr.source2_value),
-                )
-                if source_key in producers:
-                    dependencies[idx].add(producers[source_key])
+                block = function_blocks.get(function_key)
+                if block is not None:
+                    start_idx, end_idx = block
+                    for func_idx in range(start_idx, end_idx + 1):
+                        if func_idx != idx:
+                            dependencies[idx].add(func_idx)
+                    for target_key in function_block_targets.get(function_key, ()):
+                        producers[target_key] = idx
 
         return dependencies, producers
 
@@ -243,6 +480,7 @@ class GFSLGenome:
                     f"Result reference '{ref}' must include '$', '#', '!' or '!#'."
                 )
             dtype_map = {
+                "n": DataType.NONE,
                 "b": DataType.BOOLEAN,
                 "d": DataType.DECIMAL,
                 "t": DataType.TENSOR,
@@ -467,10 +705,23 @@ class GFSLGenome:
                         f"{prefix} WHILE {self._decode_source(instr, 1)}{weight_suffix}"
                     )
                 elif instr.operation == Operation.END:
-                    readable.append(f"{prefix} END{weight_suffix}")
+                    if instr.source1_cat == Category.NONE:
+                        readable.append(f"{prefix} END{weight_suffix}")
+                    else:
+                        readable.append(
+                            f"{prefix} END {self._decode_source(instr, 1)}{weight_suffix}"
+                        )
                 elif instr.operation == Operation.RESULT:
                     readable.append(
                         f"{prefix} RESULT {self._decode_source(instr, 1)}{weight_suffix}"
+                    )
+                elif instr.operation == Operation.CALL:
+                    readable.append(
+                        f"{prefix} CALL {self._decode_source(instr, 1)}{weight_suffix}"
+                    )
+                else:
+                    readable.append(
+                        f"{prefix} {resolve_operation_name(instr.operation)}{weight_suffix}"
                     )
             else:
                 target = self._decode_target(instr)
@@ -478,7 +729,9 @@ class GFSLGenome:
                 source1 = self._decode_source(instr, 1)
                 source2 = self._decode_source(instr, 2)
 
-                if instr.source2_cat == Category.NONE:
+                if instr.operation == Operation.FUNC and instr.target_cat == Category.FUNCTION:
+                    readable.append(f"{prefix} FUNC {target}{weight_suffix}")
+                elif instr.source2_cat == Category.NONE:
                     readable.append(
                         f"{prefix} {target} = {op_name}({source1}){weight_suffix}"
                     )
@@ -503,6 +756,8 @@ class GFSLGenome:
             return f"{dtype.name[0].lower()}!{idx}"
         if cat == Category.LIST_CONSTANT:
             return f"{dtype.name[0].lower()}!#{idx}"
+        if cat == Category.FUNCTION:
+            return f"{dtype.name[0].lower()}&{idx}"
         return "NONE"
 
     def _decode_source(self, instr: GFSLInstruction, source_num: int) -> str:
@@ -526,6 +781,8 @@ class GFSLGenome:
             return f"{dtype.name[0].lower()}!{val}"
         if cat == Category.LIST_CONSTANT:
             return f"{dtype.name[0].lower()}!#{val}"
+        if cat == Category.FUNCTION:
+            return f"{dtype.name[0].lower()}&{val}"
         if cat == Category.VALUE:
             context = (instr.operation, None)
             if (
@@ -548,4 +805,4 @@ class GFSLGenome:
         return f"?{cat}:{dtype}:{val}"
 
 
-__all__ = ["GFSLGenome"]
+__all__ = ["InstructionActivity", "GFSLGenome"]

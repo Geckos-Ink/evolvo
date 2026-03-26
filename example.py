@@ -8,6 +8,7 @@ Usage:
   python example.py expression
   python example.py neural
   python example.py extraction
+  python example.py function
 """
 
 import random
@@ -115,11 +116,13 @@ def print_usage() -> None:
         "  expression           Run examples/expression_flow.py\n"
         "  neural               Run examples/neural_flow.py\n"
         "  extraction           Run examples/operation_extraction.py\n"
+        "  function             Run examples/function_flow.py\n"
         "\n"
         "You can also run the scripts directly:\n"
         "  python examples/expression_flow.py\n"
         "  python examples/neural_flow.py\n"
         "  python examples/operation_extraction.py\n"
+        "  python examples/function_flow.py\n"
     )
 
 
@@ -206,6 +209,8 @@ if __name__ == "__main__":
         run_example_script("neural_flow.py")
     elif mode in {"extraction", "operation", "operation_extraction"}:
         run_example_script("operation_extraction.py")
+    elif mode in {"function", "functions", "function_flow"}:
+        run_example_script("function_flow.py")
     elif mode == "evolution":
         main()
     else:

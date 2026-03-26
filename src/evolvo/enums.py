@@ -14,6 +14,7 @@ class Category(IntEnum):
     CONFIG = 4  # &
     LIST = 5  # ! (typed list, e.g. d!0)
     LIST_CONSTANT = 6  # !# (typed constant list, e.g. d!#0)
+    FUNCTION = 7  # & (typed function reference, e.g. d&0)
 
 
 class DataType(IntEnum):
@@ -34,6 +35,8 @@ class Operation(IntEnum):
     END = 2
     SET = 3
     RESULT = 4
+    FUNC = 5
+    CALL = 6
 
     # Boolean operations (target = boolean)
     GT = 10
@@ -100,6 +103,7 @@ CONTROL_FLOW_OPS: List[Operation] = [
     Operation.END,
     Operation.SET,
     Operation.RESULT,
+    Operation.FUNC,
 ]
 
 BOOLEAN_COMPARE_OPS: List[Operation] = [
@@ -186,6 +190,7 @@ UNARY_OPS: Set[Operation] = {
     Operation.COS,
     Operation.EXP,
     Operation.LOG,
+    Operation.CALL,
     Operation.PREPEND,
     Operation.APPEND,
     Operation.CLONE,

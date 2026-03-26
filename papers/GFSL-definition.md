@@ -358,6 +358,74 @@ When `FIFO` or `FILO` is applied to an empty mutable list, the returned value is
 Default execution rule: if a later instruction requires a source that is `VOID`, that instruction is skipped.
 This keeps runtime behavior deterministic while preserving the information that the pop did not produce a concrete value.
 
+## Optional Typed Functions
+
+GFSL can optionally model function declarations as typed references, reusing the packed pointer semantics.
+
+Human-readable shorthand:
+- Function reference: `<type>&<index>` (examples: `d&0`, `b&1`, `t&0`, `n&0`)
+- `n&*` means a function with `NONE`/void return type.
+
+### Function Declaration
+
+Function declarations are explicit instructions:
+
+```
+d&0 FUNC
+```
+
+Equivalent slot meaning:
+- target category = FUNCTION
+- target specifier = packed `(return_type, function_index)`
+- operation = `FUNC`
+
+### Function End / Return
+
+A function scope is closed with `END`:
+- Non-void return: `<type>$<local_index> END` (example: `t$3 END`)
+- Void return: `n#0 END` or `NONE END`
+
+The non-void return index must refer to a variable defined in the function scope.
+
+### Function Call
+
+Calls can be assigned or executed for side effects:
+
+```
+d$2 CALL d&0
+NONE CALL n&0
+```
+
+- `d$2 CALL d&0` assigns the function return value to `d$2`.
+- `NONE CALL n&0` is valid for void functions.
+
+### Optional Behaviors
+
+- **External assignments from function body**: optional execution mode.
+- **Nested functions**: optional execution mode.
+- **Void functions with mandatory external effects**: optional runtime policy; when enabled, `n&*` calls are considered valid only when external writes are active.
+
+These options are runtime/executor policies and do not change the base slot encoding.
+
+## Runtime Activity Lifecycle (Active vs Dormant Genome)
+
+To emulate biological-like dormant DNA, GFSL supports adding instructions that may remain inactive until later mutations make them reachable.
+
+The runtime tracks:
+- instruction execution hit count
+- last execution tick
+
+This enables:
+- counting currently active instructions
+- identifying stale (never used / rarely used / long-idle) instructions
+- pruning stale instructions while preserving effective dependencies
+
+Recommended lifecycle:
+1. Allow additive mutations (new instructions/functions can remain dormant).
+2. Evaluate repeatedly and collect activity metrics.
+3. Periodically prune stale instructions with a conservative policy (`keep_effective = true`).
+4. Continue evolution on the compacted genome.
+
 ## Control Flow
 
 ### Structured Blocks
@@ -482,7 +550,9 @@ The root of all decisions. Determines if the instruction assigns a value.
 - `NONE` - No value assignment (used for first slot control flow operationsn, scope management, and configuration)
 - `$` - Variable assignment (mutable storage)
 - `#` - Constant definition (immutable within scope)
-- `!` - Arbitrary value
+- `!` - Mutable typed list target/reference
+- `!#` - Typed constant-list reference (clone-only source)
+- `&` - Typed function reference/declaration target
 
 The first instruction's slot, always referring to an assignment, can only be NONE or $ (variable).
 
@@ -518,13 +588,17 @@ In this document, a pointer could be indicated as d#1 for readibility, but for a
 The operation to perform, strictly constrained by target type.
 
 **When TARGET = NONE:**
-- `CALL` - Function invocation
-- `RET` - Return from function (better implicit solutions like "last variable assigned value")
-- `BEGIN` - Start declaration block
+- `IF` / `WHILE` - Structured control
 - `SET` - Set property in declaration
-- `EXEC` - Execute declared block
 - `END` - End current scope (see Section 5.5)
 - `RESULT` - Mark variable as output (see Section 5.6)
+- `CALL` - Void function invocation (`NONE CALL n&k`)
+
+**When TARGET = <type>&<index>:**
+- `FUNC` - Start function declaration block for return type/index.
+
+**When TARGET = typed scalar (`$`/`#`):**
+- `CALL` can be offered when a function with matching return type exists.
 
 RESULT is not mandatory: the last variable of the desired type or the first/last assigned variable can be used as the result.
 
@@ -591,8 +665,9 @@ For property setting (SET):
 - Then enumerate valid properties
 
 For scope termination (END):
-- Options: `[SCOPE_TYPE]`
-- Then: `[BLOCK, IF, WHILE, FOR, FUNC, LAYER, ALL]`
+- Default options: `[NONE]` for block closures
+- When closing a non-void function: source1 must be the return variable (`<type>$<k>`)
+- When closing a void function: source1 may be `NONE` or `n#0`
 
 ### 2.4 Slot 4: SOURCE1_SPECIFIER
 

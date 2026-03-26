@@ -21,6 +21,8 @@ The project reimplements the **Genetic Fixed Structure Language (GFSL)** as desc
 - **Real-time evaluation** (`RealTimeEvaluator`) with pluggable scoring aggregators and per-test callbacks.
 - **Operation weights (optional)** to attach usefulness or performance metadata to instructions or operation groups.
 - **Optional typed list support** with `d!0` / `d!#0` references and dedicated queue/stack ops (`PREPEND`, `APPEND`, `CLONE`, `FIFO`, `FILO`, `LISTCOUNT`, `LISTHASITEMS`).
+- **Optional typed function support** with declarations (`d&0 FUNC`), returns (`END d$k` / `END n#0`), and calls (`d$2 CALL d&0`).
+- **Instruction activity tracking + pruning** so genomes can count active instructions over time and trim stale code (`prune_stale_instructions`).
 - **Rich utilities** for mutation, crossover, diversity tracking, and population management.
 - **Ad-hoc personalization** via `register_custom_operation`, letting you graft bespoke operations into the validator/executor without forking the core.
 
@@ -90,6 +92,8 @@ The demo:
 5. Displays the effective GFSL instruction trace and spot-check predictions.
 
 > Want to see runtime personalization instead? Run `python example.py personalization` to register and execute a bespoke decimal operation.
+>
+> Want to see functions + pruning flow? Run `python example.py function`.
 
 If you prefer to start from scratch, the minimal API looks like:
 
@@ -129,6 +133,7 @@ Practical scripts live in `examples/`:
 - `examples/expression_flow.py` — slot-wise builder flow, option previews, and conditional consequents.
 - `examples/neural_flow.py` — SET/CONV neural flow with a consequent RELU.
 - `examples/operation_extraction.py` — dependency-based extraction for specific result references.
+- `examples/function_flow.py` — typed function declaration/call plus activity-based stale-instruction pruning.
 
 ---
 
@@ -142,7 +147,7 @@ Practical scripts live in `examples/`:
 | `SlotValidator` | Enforces cascading slot validity and tracks active variables/constants/lists. |
 | `ValueEnumerations` | Operation- and config-specific lookup tables for numeric slots. |
 | `GFSLGenome` | Holds instructions, output declarations, signatures, and operation/effective extraction helpers. |
-| `GFSLExecutor` | Executes only the effective instructions while supporting injected inputs. |
+| `GFSLExecutor` | Executes only the effective instructions, supports optional function scopes/calls, and records instruction activity. |
 
 ### Evaluation & Search
 
@@ -226,6 +231,85 @@ print(genome.to_human_readable(include_weights=True))
 
 If an operation belongs to multiple groups, `OperationWeights.resolve_weight`
 combines group weights using `group_reduce` (default: `"mean"`).
+
+---
+
+## Optional Typed Functions
+
+Functions are represented as typed references (`<type>&<index>`) and are fully optional.
+
+- Declare: `d&0 FUNC`
+- End/return:
+  - Non-void: `END d$1`
+  - Void: `END n#0` (or `END NONE`)
+- Call:
+  - Return value: `d$2 CALL d&0`
+  - Void call: `NONE CALL n&0`
+
+Execution behavior:
+- Function bodies are isolated by default (writes stay local).
+- Enable external writes with `GFSLExecutor(allow_function_external_writes=True)`.
+- Nested function declarations can run when `allow_nested_functions=True` (default).
+- Optional guard for void functions: `require_void_external_writes=True`.
+
+```python
+from evolvo import (
+    Category, DataType, GFSLExecutor, GFSLGenome, GFSLInstruction,
+    Operation, pack_type_index
+)
+
+genome = GFSLGenome("algorithm")
+genome.validator.variable_counts[int(DataType.DECIMAL)] = 1  # expose d$0 input
+
+# d&0 FUNC
+genome.add_instruction(GFSLInstruction([
+    Category.FUNCTION, pack_type_index(DataType.DECIMAL, 0), Operation.FUNC,
+    Category.NONE, 0,
+    Category.NONE, 0,
+]))
+# d$1 = ADD(d$0, 2.0)
+genome.add_instruction(GFSLInstruction([
+    Category.VARIABLE, pack_type_index(DataType.DECIMAL, 1), Operation.ADD,
+    Category.VARIABLE, pack_type_index(DataType.DECIMAL, 0),
+    Category.VALUE, 3,
+]))
+# END d$1
+genome.add_instruction(GFSLInstruction([
+    Category.NONE, 0, Operation.END,
+    Category.VARIABLE, pack_type_index(DataType.DECIMAL, 1),
+    Category.NONE, 0,
+]))
+# d$2 = CALL d&0
+genome.add_instruction(GFSLInstruction([
+    Category.VARIABLE, pack_type_index(DataType.DECIMAL, 2), Operation.CALL,
+    Category.FUNCTION, pack_type_index(DataType.DECIMAL, 0),
+    Category.NONE, 0,
+]))
+
+genome.mark_output(DataType.DECIMAL, 2)
+print(GFSLExecutor().execute(genome, {"d$0": 3.0}))  # {'d$2': 5.0}
+```
+
+---
+
+## Activity Tracking And Pruning
+
+`GFSLExecutor.execute(...)` records instruction activity into `genome.instruction_activity` by default.
+Use this to count active code and prune stale instructions across repeated runs/evolutions.
+
+```python
+# Run genome several times...
+executor = GFSLExecutor()
+for x in [1.0, 2.0, 3.0]:
+    executor.execute(genome, {"d$0": x})
+
+print([m.hits for m in genome.instruction_activity])
+print(genome.active_instruction_count(min_hits=1))
+
+# Remove instructions never used recently (while preserving effective ones by default)
+removed = genome.prune_stale_instructions(min_hits=1, keep_effective=True)
+print("pruned:", removed)
+```
 
 ---
 

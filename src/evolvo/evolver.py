@@ -83,7 +83,10 @@ class GFSLEvolver:
         elif mutation_type == "remove" and len(mutated.instructions) > 1:
             idx = random.randint(0, len(mutated.instructions) - 1)
             mutated.instructions.pop(idx)
+            if idx < len(mutated.instruction_activity):
+                mutated.instruction_activity.pop(idx)
 
+        mutated.rebuild_validator_state()
         mutated._signature = None
         mutated._effective_instructions = None
         mutated.fitness = None
