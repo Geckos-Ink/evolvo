@@ -265,13 +265,24 @@ class GFSLSupervisedDirectionModel(_BaseDirectionModule):
         _require_torch("GFSLSupervisedDirectionModel")
         super().__init__()
         layers: List[nn.Module] = []
-        widths = hidden_layers or [128, 64]
+        raw_widths = [int(width) for width in (hidden_layers or [256, 160, 96]) if int(width) > 0]
+        if len(raw_widths) < 3:
+            fallback = [256, 160, 96]
+            for width in fallback:
+                if len(raw_widths) >= 3:
+                    break
+                if width not in raw_widths:
+                    raw_widths.append(width)
+        widths = raw_widths[:5]
         prev = input_dim
-        for width in widths:
+        for idx, width in enumerate(widths):
             if width <= 0:
                 continue
             layers.append(nn.Linear(prev, width))
-            layers.append(nn.ReLU())
+            layers.append(nn.LayerNorm(width))
+            layers.append(nn.GELU())
+            if idx < len(widths) - 1:
+                layers.append(nn.Dropout(p=0.08))
             prev = width
         layers.append(nn.Linear(prev, 1))
         self.model = nn.Sequential(*layers)
