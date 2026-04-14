@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import random
 from collections import defaultdict, deque
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -38,6 +38,82 @@ def _require_torch(feature: str) -> None:
 
 
 _BaseDirectionModule = nn.Module if nn is not None else object
+
+
+def _torch_has_rocm() -> bool:
+    if torch is None:
+        return False
+    try:
+        return bool(getattr(torch.version, "hip", None)) and bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def _torch_has_cuda() -> bool:
+    if torch is None:
+        return False
+    try:
+        return bool(torch.cuda.is_available()) and not _torch_has_rocm()
+    except Exception:
+        return False
+
+
+def _torch_has_mps() -> bool:
+    if torch is None:
+        return False
+    try:
+        return bool(
+            hasattr(torch.backends, "mps")
+            and torch.backends.mps.is_available()
+        )
+    except Exception:
+        return False
+
+
+def resolve_torch_accelerator(
+    preferred_device: Optional[str] = "auto",
+) -> Tuple[str, str, bool, bool]:
+    """Resolve torch backend/device.
+
+    Returns:
+        backend: one of ``none|cpu|cuda|rocm|mps``
+        device: torch device name (``cpu|cuda|mps``)
+        accelerator_available: whether a GPU-style accelerator is selected
+        torch_available: whether torch import/runtime is available
+    """
+    if torch is None:
+        return "none", "cpu", False, False
+
+    preferred = str(preferred_device or "auto").strip().lower()
+    if preferred not in {"auto", "cpu", "cuda", "rocm", "mps"}:
+        preferred = "auto"
+
+    rocm_available = _torch_has_rocm()
+    cuda_available = _torch_has_cuda() or rocm_available
+    mps_available = _torch_has_mps()
+
+    if preferred == "cpu":
+        return "cpu", "cpu", False, True
+
+    if preferred == "rocm":
+        if rocm_available:
+            return "rocm", "cuda", True, True
+    elif preferred == "cuda":
+        if cuda_available:
+            if rocm_available:
+                return "rocm", "cuda", True, True
+            return "cuda", "cuda", True, True
+    elif preferred == "mps":
+        if mps_available:
+            return "mps", "mps", True, True
+
+    if rocm_available:
+        return "rocm", "cuda", True, True
+    if cuda_available:
+        return "cuda", "cuda", True, True
+    if mps_available:
+        return "mps", "mps", True, True
+    return "none", "cpu", False, True
 
 
 class GFSLFeatureExtractor:
@@ -224,8 +300,15 @@ class GFSLSupervisedGuide:
             self.feature_extractor.feature_dim,
             hidden_layers,
         )
-        device_name = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.device = torch.device(device_name)
+        requested_device = str(device or "auto")
+        (
+            self.device_backend,
+            resolved_device,
+            self.accelerator_available,
+            _torch_available,
+        ) = resolve_torch_accelerator(requested_device)
+        self.device_requested = requested_device
+        self.device = torch.device(resolved_device)
         self.model.to(self.device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=1e-3)
 
@@ -342,6 +425,7 @@ class GFSLSupervisedGuide:
 
 
 __all__ = [
+    "resolve_torch_accelerator",
     "GFSLFeatureExtractor",
     "GFSLSupervisedDirectionModel",
     "GFSLSupervisedGuide",

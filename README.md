@@ -161,7 +161,7 @@ Practical scripts live in `examples/`:
 |-----------|---------|
 | `RealTimeEvaluator` | Runs genomes across multiple test cases, aggregates scores, and supports callbacks per evaluation. |
 | `RecursiveModelBuilder` | Translates neural GFSL genomes into PyTorch `nn.Module`s (e.g., CNNs). |
-| `GFSLEvolver` | Population management (init/mutate/crossover/selection), integrates optional guidance, and tracks diversity. |
+| `GFSLEvolver` | Population management with adaptive mutation pressure, diversity deadlock fallback (immigrant injection), optional batch evaluation, and guidance integration. |
 
 ### Guidance Strategies
 
@@ -170,6 +170,7 @@ Practical scripts live in `examples/`:
   - Extracts structural features from genomes (`GFSLFeatureExtractor`).
   - Learns a regression model (`GFSLSupervisedDirectionModel`) that predicts future fitness.
   - Biases mutation by sampling several candidate offspring and choosing the one with the best predicted fitness.
+  - Supports accelerator auto-selection via `resolve_torch_accelerator(...)` with `auto|cpu|cuda|rocm|mps`.
 
 Both approaches respect GFSL’s fixed-slot constraints; the supervised guide simply tilts the mutation operator toward more promising instruction combinations.
 

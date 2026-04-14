@@ -57,6 +57,7 @@ from .model import RecursiveModelBuilder
 from .evolver import GFSLEvolver
 from .qlearning import GFSLQLearningGuide
 from .supervised import (
+    resolve_torch_accelerator,
     GFSLFeatureExtractor,
     GFSLSupervisedDirectionModel,
     GFSLSupervisedGuide,
@@ -118,6 +119,7 @@ __all__ = [
     "RecursiveModelBuilder",
     "GFSLEvolver",
     "GFSLQLearningGuide",
+    "resolve_torch_accelerator",
     "GFSLFeatureExtractor",
     "GFSLSupervisedDirectionModel",
     "GFSLSupervisedGuide",
