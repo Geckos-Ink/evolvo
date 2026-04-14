@@ -261,7 +261,13 @@ class GFSLFeatureExtractor:
 class GFSLSupervisedDirectionModel(_BaseDirectionModule):
     """Small feed-forward network that predicts genome fitness."""
 
-    def __init__(self, input_dim: int, hidden_layers: Optional[List[int]] = None):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_layers: Optional[List[int]] = None,
+        *,
+        dropout: float = 0.08,
+    ):
         _require_torch("GFSLSupervisedDirectionModel")
         super().__init__()
         layers: List[nn.Module] = []
@@ -274,6 +280,7 @@ class GFSLSupervisedDirectionModel(_BaseDirectionModule):
                 if width not in raw_widths:
                     raw_widths.append(width)
         widths = raw_widths[:5]
+        dropout_p = max(0.0, min(0.30, float(dropout)))
         prev = input_dim
         for idx, width in enumerate(widths):
             if width <= 0:
@@ -281,8 +288,8 @@ class GFSLSupervisedDirectionModel(_BaseDirectionModule):
             layers.append(nn.Linear(prev, width))
             layers.append(nn.LayerNorm(width))
             layers.append(nn.GELU())
-            if idx < len(widths) - 1:
-                layers.append(nn.Dropout(p=0.08))
+            if idx < len(widths) - 1 and dropout_p > 0.0:
+                layers.append(nn.Dropout(p=dropout_p))
             prev = width
         layers.append(nn.Linear(prev, 1))
         self.model = nn.Sequential(*layers)
@@ -304,13 +311,19 @@ class GFSLSupervisedGuide:
         candidate_pool: int = 3,
         max_observations: int = 20,
         device: Optional[str] = None,
+        capacity_auto_tune: bool = True,
     ):
         _require_torch("GFSLSupervisedGuide")
         self.feature_extractor = GFSLFeatureExtractor()
-        self.model = GFSLSupervisedDirectionModel(
-            self.feature_extractor.feature_dim,
-            hidden_layers,
-        )
+        base_layers = [int(width) for width in (hidden_layers or [256, 160, 96]) if int(width) > 0]
+        if len(base_layers) < 3:
+            fallback = [256, 160, 96]
+            for width in fallback:
+                if len(base_layers) >= 3:
+                    break
+                if width not in base_layers:
+                    base_layers.append(width)
+        self.base_hidden_layers = base_layers[:5]
         requested_device = str(device or "auto")
         (
             self.device_backend,
@@ -320,8 +333,6 @@ class GFSLSupervisedGuide:
         ) = resolve_torch_accelerator(requested_device)
         self.device_requested = requested_device
         self.device = torch.device(resolved_device)
-        self.model.to(self.device)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=1e-3)
 
         self.buffer = deque(maxlen=buffer_size)
         self.targets = deque(maxlen=buffer_size)
@@ -335,6 +346,124 @@ class GFSLSupervisedGuide:
         self.target_std: Optional[float] = None
         self.trained = False
         self.loss_history: List[float] = []
+        self.capacity_auto_tune = bool(capacity_auto_tune)
+        self.capacity_bias = 0.0
+        self.regularization_bias = 0.0
+        self.capacity_rebuild_cooldown = 0
+        self.overfit_streak = 0
+        self.underfit_streak = 0
+        self.last_train_loss: Optional[float] = None
+        self.last_val_loss: Optional[float] = None
+
+        self.hidden_layers_current: List[int] = []
+        self.dropout_current: float = 0.0
+        self.model: GFSLSupervisedDirectionModel
+        self.optimizer: optim.Optimizer
+        initial_layers = self._scaled_hidden_layers(self.min_buffer)
+        initial_dropout = self._effective_dropout(self.min_buffer)
+        self._rebuild_model(initial_layers, dropout=initial_dropout)
+
+    def _scaled_hidden_layers(self, dataset_size: int) -> List[int]:
+        dataset = max(1, int(dataset_size))
+        if not self.capacity_auto_tune:
+            return list(self.base_hidden_layers)
+
+        buffer_max = max(self.min_buffer + 1, int(self.buffer.maxlen))
+        sample_ratio = max(
+            0.0,
+            min(
+                1.0,
+                (float(dataset) - float(self.min_buffer))
+                / float(max(1, buffer_max - int(self.min_buffer))),
+            ),
+        )
+        scale = (0.72 + (0.58 * sample_ratio)) * (1.0 + float(self.capacity_bias))
+        scale = max(0.60, min(1.55, scale))
+
+        cap_from_samples = max(96, min(768, int(round(float(dataset) * 2.2))))
+        cap_from_features = max(
+            96,
+            min(768, int(round(float(self.feature_extractor.feature_dim) * 10.0))),
+        )
+        width_cap = min(cap_from_samples, cap_from_features)
+
+        scaled: List[int] = []
+        prev = 1_000_000
+        for base in self.base_hidden_layers:
+            width = int(round(float(base) * scale))
+            width = max(64, min(width_cap, width))
+            if width > prev:
+                width = prev
+            scaled.append(width)
+            prev = width
+
+        if len(scaled) < 3:
+            fallback = [256, 160, 96]
+            for width in fallback:
+                if len(scaled) >= 3:
+                    break
+                scaled.append(int(min(width, width_cap)))
+        return scaled[:5]
+
+    def _effective_dropout(self, dataset_size: int) -> float:
+        dataset = max(1, int(dataset_size))
+        if not self.capacity_auto_tune:
+            return 0.08
+        buffer_max = max(self.min_buffer + 1, int(self.buffer.maxlen))
+        sample_ratio = max(
+            0.0,
+            min(
+                1.0,
+                (float(dataset) - float(self.min_buffer))
+                / float(max(1, buffer_max - int(self.min_buffer))),
+            ),
+        )
+        dropout = 0.14 - (0.07 * sample_ratio) + float(self.regularization_bias)
+        return max(0.03, min(0.20, float(dropout)))
+
+    def _rebuild_model(self, hidden_layers: List[int], *, dropout: float) -> None:
+        self.model = GFSLSupervisedDirectionModel(
+            self.feature_extractor.feature_dim,
+            hidden_layers,
+            dropout=float(dropout),
+        )
+        self.model.to(self.device)
+        self.optimizer = optim.AdamW(self.model.parameters(), lr=1e-3, weight_decay=2e-4)
+        self.hidden_layers_current = [int(width) for width in hidden_layers]
+        self.dropout_current = float(dropout)
+
+    def _update_capacity_feedback(self, *, train_loss: float, val_loss: Optional[float]) -> None:
+        self.last_train_loss = float(train_loss)
+        self.last_val_loss = float(val_loss) if val_loss is not None else None
+        if not self.capacity_auto_tune or val_loss is None:
+            return
+
+        train = max(1e-6, float(train_loss))
+        val = max(1e-6, float(val_loss))
+        relative_gap = (val - train) / train
+        balanced_high = train > 0.95 and val > 0.95 and abs(relative_gap) < 0.22
+        overfit = relative_gap > 0.35 and train < 1.10
+
+        if overfit:
+            self.overfit_streak += 1
+            self.underfit_streak = max(0, self.underfit_streak - 1)
+        elif balanced_high:
+            self.underfit_streak += 1
+            self.overfit_streak = max(0, self.overfit_streak - 1)
+        else:
+            self.overfit_streak = max(0, self.overfit_streak - 1)
+            self.underfit_streak = max(0, self.underfit_streak - 1)
+
+        if self.overfit_streak >= 2:
+            self.capacity_bias = max(-0.30, float(self.capacity_bias) - 0.08)
+            self.regularization_bias = min(0.06, float(self.regularization_bias) + 0.015)
+            self.capacity_rebuild_cooldown = 0
+            self.overfit_streak = 0
+        elif self.underfit_streak >= 2:
+            self.capacity_bias = min(0.35, float(self.capacity_bias) + 0.08)
+            self.regularization_bias = max(-0.03, float(self.regularization_bias) - 0.01)
+            self.capacity_rebuild_cooldown = 0
+            self.underfit_streak = 0
 
     def observe_population(self, population: List[GFSLGenome]):
         """Collect labelled data from the current population and train when ready."""
@@ -359,6 +488,21 @@ class GFSLSupervisedGuide:
 
         features = torch.stack(list(self.buffer)).to(self.device)
         targets_tensor = torch.tensor(list(self.targets), dtype=torch.float32, device=self.device)
+        dataset_size = int(features.size(0))
+
+        target_layers = self._scaled_hidden_layers(dataset_size)
+        target_dropout = self._effective_dropout(dataset_size)
+        if self.capacity_rebuild_cooldown > 0:
+            self.capacity_rebuild_cooldown -= 1
+        needs_rebuild = (
+            not self.hidden_layers_current
+            or len(target_layers) != len(self.hidden_layers_current)
+            or any(abs(int(a) - int(b)) >= 48 for a, b in zip(target_layers, self.hidden_layers_current))
+            or abs(float(target_dropout) - float(self.dropout_current)) >= 0.03
+        )
+        if needs_rebuild and self.capacity_rebuild_cooldown <= 0:
+            self._rebuild_model(target_layers, dropout=target_dropout)
+            self.capacity_rebuild_cooldown = 2
 
         self.target_mean = float(targets_tensor.mean().item())
         target_std = float(targets_tensor.std().item())
@@ -367,17 +511,35 @@ class GFSLSupervisedGuide:
         self.target_std = target_std
 
         normalized_targets = (targets_tensor - self.target_mean) / target_std
+        val_size = 0
+        if dataset_size >= (int(self.min_buffer) + 8):
+            val_size = max(8, int(round(0.15 * float(dataset_size))))
+            val_size = min(max(0, dataset_size - 8), val_size)
+        permutation_all = torch.randperm(dataset_size, device=self.device)
+        if val_size > 0:
+            val_idx = permutation_all[:val_size]
+            train_idx = permutation_all[val_size:]
+        else:
+            val_idx = None
+            train_idx = permutation_all
 
-        dataset_size = features.size(0)
+        train_x = features[train_idx]
+        train_y = normalized_targets[train_idx]
+        if train_x.size(0) == 0:
+            train_x = features
+            train_y = normalized_targets
+            val_idx = None
+
         self.model.train()
+        last_loss = torch.tensor(0.0, device=self.device)
 
         for _ in range(self.epochs):
-            permutation = torch.randperm(dataset_size, device=self.device)
-            for start in range(0, dataset_size, self.batch_size):
+            permutation = torch.randperm(train_x.size(0), device=self.device)
+            for start in range(0, train_x.size(0), self.batch_size):
                 end = start + self.batch_size
                 batch_idx = permutation[start:end]
-                batch_x = features[batch_idx]
-                batch_y = normalized_targets[batch_idx]
+                batch_x = train_x[batch_idx]
+                batch_y = train_y[batch_idx]
 
                 predictions = self.model(batch_x)
                 loss = F.mse_loss(predictions, batch_y)
@@ -386,10 +548,21 @@ class GFSLSupervisedGuide:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5.0)
                 self.optimizer.step()
+                last_loss = loss
 
-            self.loss_history.append(float(loss.item()))
+            self.loss_history.append(float(last_loss.item()))
 
         self.model.eval()
+        with torch.no_grad():
+            train_predictions = self.model(train_x)
+            train_loss = float(F.mse_loss(train_predictions, train_y).item())
+            val_loss: Optional[float] = None
+            if val_idx is not None and val_idx.numel() > 0:
+                val_x = features[val_idx]
+                val_y = normalized_targets[val_idx]
+                val_predictions = self.model(val_x)
+                val_loss = float(F.mse_loss(val_predictions, val_y).item())
+        self._update_capacity_feedback(train_loss=train_loss, val_loss=val_loss)
         self.trained = True
 
     def _predict_from_features(self, feature_list: List[torch.Tensor]) -> np.ndarray:
