@@ -45,11 +45,13 @@ pip install numpy
 # install PyTorch if you plan to use the supervised guide, RecursiveModelBuilder, or the torch-backed examples
 pip install torch
 
-# install optional accelerator extras (torch + kompute bindings)
+# install optional accelerator extras (torch + kompute bindings from source)
 pip install -r requirements-accelerators.txt
 ```
 
 > The core library only depends on NumPy. PyTorch and Kompute (`kp`) are optional accelerators.
+> If `pip install kp` fails on your platform/toolchain, install Kompute Python bindings from source:
+> `pip install git+https://github.com/KomputeProject/kompute.git`
 
 If you are running directly from the repo (without installing a package), add the source folder to your Python path:
 
@@ -184,6 +186,8 @@ Both approaches respect GFSL’s fixed-slot constraints; the supervised guide si
 
 - `auto` (default): try Kompute only if runtime is available; otherwise use CPU.
 - `kompute`: force Kompute attempt; on runtime/kernel errors it warns and falls back to CPU (unless `kompute_fail_hard=True`).
+- Before execution, a compatibility pre-check reports unsupported op names/counts (for example `CALLx1, FUNCx1`) and falls back cleanly.
+- In `auto` mode, Kompute is process-disabled after the first non-recoverable runtime failure to avoid warning spam in large evaluation loops.
 - `cpu`: always CPU path.
 
 Example:

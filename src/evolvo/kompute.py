@@ -121,6 +121,10 @@ class KomputeExecutionPlan:
     notes: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
+        unsupported_by_operation: Dict[str, int] = {}
+        for item in self.unsupported:
+            key = str(item.operation_name)
+            unsupported_by_operation[key] = int(unsupported_by_operation.get(key, 0)) + 1
         return {
             "stage_count": int(len(self.stages)),
             "persistent_buffers": list(self.persistent_buffers),
@@ -134,6 +138,33 @@ class KomputeExecutionPlan:
                 }
                 for item in self.unsupported
             ],
+            "unsupported_by_operation": unsupported_by_operation,
+            "notes": list(self.notes),
+        }
+
+
+@dataclass(frozen=True)
+class KomputeCompatibilityReport:
+    """Compact compatibility summary for one genome/selection."""
+
+    stage_count: int
+    unsupported_count: int
+    unsupported_by_operation: Dict[str, int]
+    notes: Tuple[str, ...] = ()
+
+    @property
+    def supported(self) -> bool:
+        return int(self.stage_count) > 0 and int(self.unsupported_count) == 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "supported": bool(self.supported),
+            "stage_count": int(self.stage_count),
+            "unsupported_count": int(self.unsupported_count),
+            "unsupported_by_operation": {
+                str(name): int(count)
+                for name, count in self.unsupported_by_operation.items()
+            },
             "notes": list(self.notes),
         }
 
@@ -184,6 +215,28 @@ class KomputeInstructionRegistry:
                 op,
                 shader_key=f"tensor.{op.name.lower()}",
                 target_type=DataType.TENSOR,
+            )
+        for op in LIST_QUERY_OPS:
+            self.register_binding(
+                op,
+                shader_key=f"list.{op.name.lower()}",
+                target_type=(
+                    DataType.DECIMAL
+                    if op == Operation.LISTCOUNT
+                    else DataType.BOOLEAN
+                ),
+            )
+        for op in LIST_TARGET_OPS:
+            self.register_binding(
+                op,
+                shader_key=f"list.{op.name.lower()}",
+                target_type=DataType.NONE,
+            )
+        for op in LIST_VALUE_OPS:
+            self.register_binding(
+                op,
+                shader_key=f"list.{op.name.lower()}",
+                target_type=DataType.NONE,
             )
 
     def set_default_type(self, dtype: Union[DataType, int], spec: KomputeTypeSpec) -> None:
@@ -241,6 +294,34 @@ class KomputeInstructionRegistry:
 
     def binding_for(self, operation_code: int) -> Optional[KomputeKernelBinding]:
         return self._bindings.get(int(operation_code))
+
+    def ensure_binding_for_opcode(self, operation_code: int) -> Optional[KomputeKernelBinding]:
+        code = int(operation_code)
+        bound = self.binding_for(code)
+        if bound is not None:
+            return bound
+
+        custom = custom_operations.get(code)
+        if custom is None:
+            return None
+
+        target_dtype = DataType(custom.target_type)
+        arity = max(1, int(custom.arity))
+        source1_dtype = custom.source_types[0] if custom.source_types[0] is not None else target_dtype
+        source2_dtype = custom.source_types[1] if custom.source_types[1] is not None else (
+            target_dtype if arity >= 2 else None
+        )
+        shader_key = "custom.{dtype}.arity{arity}".format(
+            dtype=target_dtype.name.lower(),
+            arity=arity,
+        )
+        self.register_binding(
+            code,
+            shader_key=shader_key,
+            target_type=target_dtype,
+            source_types=(source1_dtype, source2_dtype),
+        )
+        return self.binding_for(code)
 
     def resolve_type(
         self,
@@ -336,6 +417,31 @@ class GFSLKomputePlanner:
             keep_vram_state=keep_vram_state,
         )
 
+    def compatibility_report(
+        self,
+        genome: GFSLGenome,
+        *,
+        order: str = "effective",
+        keep_vram_state: bool = True,
+    ) -> KomputeCompatibilityReport:
+        plan = self.compose(
+            genome,
+            order=order,
+            keep_vram_state=keep_vram_state,
+        )
+        unsupported_by_operation: Dict[str, int] = {}
+        for item in plan.unsupported:
+            op_name = str(item.operation_name)
+            unsupported_by_operation[op_name] = int(
+                unsupported_by_operation.get(op_name, 0) + 1
+            )
+        return KomputeCompatibilityReport(
+            stage_count=int(len(plan.stages)),
+            unsupported_count=int(len(plan.unsupported)),
+            unsupported_by_operation=unsupported_by_operation,
+            notes=tuple(str(note) for note in plan.notes),
+        )
+
     def compose_indices(
         self,
         genome: GFSLGenome,
@@ -392,7 +498,7 @@ class GFSLKomputePlanner:
         keep_vram_state: bool,
     ) -> Union[KomputeKernelStage, KomputeUnsupportedInstruction]:
         op_code = int(instruction.operation)
-        binding = self.registry.binding_for(op_code)
+        binding = self.registry.ensure_binding_for_opcode(op_code)
         if binding is None:
             return KomputeUnsupportedInstruction(
                 instruction_index=instruction_index,
@@ -583,6 +689,19 @@ class GFSLKomputeRuntime:
             keep_vram_state=keep_vram_state,
         )
 
+    def compatibility_report(
+        self,
+        genome: GFSLGenome,
+        *,
+        order: str = "effective",
+        keep_vram_state: bool = True,
+    ) -> KomputeCompatibilityReport:
+        return self.planner.compatibility_report(
+            genome,
+            order=order,
+            keep_vram_state=keep_vram_state,
+        )
+
     def compile(
         self,
         genome: GFSLGenome,
@@ -655,6 +774,7 @@ __all__ = [
     "KomputeKernelStage",
     "KomputeUnsupportedInstruction",
     "KomputeExecutionPlan",
+    "KomputeCompatibilityReport",
     "KomputeInstructionRegistry",
     "GFSLKomputePlanner",
     "GFSLKomputeRuntime",

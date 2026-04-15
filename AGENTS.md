@@ -52,7 +52,7 @@ Quick guidance for AI assistants working in this repository.
 
 ## Optional dependencies
 - `torch` (including `torch.nn`, `torch.nn.functional`, and `torch.optim`) is optional. The supervised guidance stack (`src/evolvo/supervised.py`), the neural model builder (`src/evolvo/model.py`), GPU-aware demos, and the provided example scripts now raise informative errors when PyTorch is missing so the rest of the library can be imported with only NumPy installed.
-- `kompute`/`kp` is optional and currently used only by planning helpers in `src/evolvo/kompute.py` (operation-to-kernel composition, type matching, persistent/transient buffer planning). Runtime shader compilation/execution is intentionally not implemented yet.
+- `kompute`/`kp` is optional and currently used only by planning helpers in `src/evolvo/kompute.py` (operation-to-kernel composition, type matching, persistent/transient buffer planning). Runtime shader compilation/execution is intentionally not implemented yet. If PyPI install fails, prefer source install: `pip install git+https://github.com/KomputeProject/kompute.git`.
 
 ## GFSL slot semantics and validity
 - Instruction layout: fixed per genome, default is 7 slots (2-slot address + op + 2-slot address + 2-slot address), auto-sized to the maximum declared expression length.

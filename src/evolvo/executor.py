@@ -15,6 +15,8 @@ from .genome import GFSLGenome
 from .instruction import GFSLInstruction
 from .values import ValueEnumerations
 
+_GLOBAL_AUTO_KOMPUTE_DISABLE_REASON: Optional[str] = None
+
 
 @dataclass
 class FunctionDefinition:
@@ -59,6 +61,7 @@ class GFSLExecutor:
         self._kompute_runtime: Any = None
         self._kompute_runtime_checked = False
         self._kompute_warned_keys: Set[str] = set()
+        self._kompute_support_cache: Dict[str, Tuple[bool, str]] = {}
         self.reset()
 
     @staticmethod
@@ -249,8 +252,11 @@ class GFSLExecutor:
         track_activity: Optional[bool],
         activity_tick: Optional[int],
     ) -> Optional[Dict[str, Any]]:
+        global _GLOBAL_AUTO_KOMPUTE_DISABLE_REASON
         backend = str(self.compute_backend).strip().lower()
         if backend == "cpu":
+            return None
+        if backend == "auto" and _GLOBAL_AUTO_KOMPUTE_DISABLE_REASON:
             return None
 
         runtime = self._get_kompute_runtime()
@@ -276,6 +282,73 @@ class GFSLExecutor:
                 self._warn_kompute_fallback_once("kp-unavailable", message)
             return None
 
+        signature = ""
+        try:
+            signature = str(genome.get_signature())
+        except Exception:
+            signature = f"genome:{id(genome)}"
+
+        cached = self._kompute_support_cache.get(signature)
+        if cached is not None:
+            supported_cached, reason_cached = cached
+            if not supported_cached:
+                if backend == "kompute":
+                    message = (
+                        "Kompute compatibility pre-check failed for genome signature "
+                        f"`{signature[:16]}` ({reason_cached}); falling back to CPU execution."
+                    )
+                    if self.kompute_fail_hard:
+                        raise RuntimeError(message)
+                    self._warn_kompute_fallback_once(f"unsupported:{signature}", message)
+                return None
+
+        try:
+            report = runtime.compatibility_report(
+                genome,
+                keep_vram_state=bool(self.kompute_keep_vram_state),
+            )
+        except Exception as exc:
+            message = (
+                "Kompute compatibility pre-check failed ({error}); "
+                "falling back to CPU execution."
+            ).format(error=str(exc))
+            if self.kompute_fail_hard:
+                raise RuntimeError(message) from exc
+            self._warn_kompute_fallback_once("compatibility-error", message)
+            return None
+
+        unsupported_count = int(getattr(report, "unsupported_count", 0))
+        stage_count = int(getattr(report, "stage_count", 0))
+        supported = bool(getattr(report, "supported", False))
+        unsupported_by_operation = getattr(report, "unsupported_by_operation", {})
+        if not isinstance(unsupported_by_operation, dict):
+            unsupported_by_operation = {}
+        if not supported:
+            top = sorted(
+                (
+                    (str(name), int(count))
+                    for name, count in unsupported_by_operation.items()
+                ),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:6]
+            top_text = ", ".join(f"{name}x{count}" for name, count in top) or "none"
+            reason = (
+                f"stages={stage_count}, unsupported={unsupported_count}, top=[{top_text}]"
+            )
+            self._kompute_support_cache[signature] = (False, reason)
+            if backend == "kompute":
+                message = (
+                    "Kompute compatibility pre-check failed for genome signature "
+                    f"`{signature[:16]}` ({reason}); falling back to CPU execution."
+                )
+                if self.kompute_fail_hard:
+                    raise RuntimeError(message)
+                self._warn_kompute_fallback_once(f"unsupported:{signature}", message)
+            return None
+
+        self._kompute_support_cache[signature] = (True, "compatible")
+
         try:
             return runtime.execute(
                 genome,
@@ -288,6 +361,13 @@ class GFSLExecutor:
             message = (
                 "Kompute execution failed ({error}); falling back to CPU execution."
             ).format(error=str(exc))
+            self._kompute_support_cache[signature] = (
+                False,
+                f"runtime-error:{str(exc)}",
+            )
+            if backend == "auto":
+                err_text = str(exc).strip() or "runtime-error"
+                _GLOBAL_AUTO_KOMPUTE_DISABLE_REASON = err_text
             if self.kompute_fail_hard:
                 raise RuntimeError(message) from exc
             self._warn_kompute_fallback_once("runtime-error", message)
