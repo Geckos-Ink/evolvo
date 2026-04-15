@@ -17,17 +17,19 @@ class RealTimeEvaluator:
         test_cases: List[Dict[str, float]],
         expected_outputs: Optional[List[Dict[str, float]]] = None,
         score_aggregator: Optional[Callable] = None,
+        executor_kwargs: Optional[Dict[str, object]] = None,
     ):
         """
         Args:
             test_cases: List of input dictionaries for each test
             expected_outputs: Optional expected outputs for each test
             score_aggregator: Custom function to aggregate scores across tests
+            executor_kwargs: Optional kwargs passed to GFSLExecutor
         """
         self.test_cases = test_cases
         self.expected_outputs = expected_outputs or [{}] * len(test_cases)
         self.score_aggregator = score_aggregator or self._default_aggregator
-        self.executor = GFSLExecutor()
+        self.executor = GFSLExecutor(**(executor_kwargs or {}))
 
     def _default_aggregator(self, scores: List[float]) -> float:
         """Default score aggregation: mean with penalty for failures."""

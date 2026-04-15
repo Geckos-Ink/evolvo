@@ -117,6 +117,7 @@ class GFSLEvolver:
         population_size: int = 50,
         supervised_guide: Optional["GFSLSupervisedGuide"] = None,
         *,
+        guide_observe_each_generation: bool = True,
         parent_pool_ratio: float = 0.60,
         stagnation_patience: int = 4,
         mutation_floor: float = 0.12,
@@ -133,6 +134,7 @@ class GFSLEvolver:
         self.elite_ratio = 0.1
         self.diversity_cache: Set[str] = set()
         self.supervised_guide = supervised_guide
+        self.guide_observe_each_generation = bool(guide_observe_each_generation)
 
         self.parent_pool_ratio = _clamp(parent_pool_ratio, 0.25, 1.0)
         self.stagnation_patience = max(1, int(stagnation_patience))
@@ -547,7 +549,7 @@ class GFSLEvolver:
 
             stagnation_pressure = self._stagnation_pressure()
 
-            if self.supervised_guide:
+            if self.supervised_guide and self.guide_observe_each_generation:
                 self.supervised_guide.observe_population(self.population)
 
             if progress_callback:

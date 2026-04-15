@@ -35,6 +35,7 @@ Quick guidance for AI assistants working in this repository.
 - When running ad-hoc scripts from the repo, set `PYTHONPATH=src` or use the provided scripts that bootstrap the path.
 - `custom_operations` is a global registry; `ValueEnumerations` consults it for custom value enumerations.
 - `src/evolvo/__init__.py` re-exports the public API; prefer `from evolvo import ...`.
+- `GFSLExecutor` supports `compute_backend=auto|cpu|kompute`. `auto` is safest; `kompute` currently attempts experimental path and falls back to CPU with warning on runtime/kernel failures (unless `kompute_fail_hard=True`).
 - Typed list pointers are supported:
   - Mutable list: `d!0`, `b!1`, `t!0` (`Category.LIST`)
   - Constant list: `d!#0` (`Category.LIST_CONSTANT`, clone-only source)
@@ -51,6 +52,7 @@ Quick guidance for AI assistants working in this repository.
 
 ## Optional dependencies
 - `torch` (including `torch.nn`, `torch.nn.functional`, and `torch.optim`) is optional. The supervised guidance stack (`src/evolvo/supervised.py`), the neural model builder (`src/evolvo/model.py`), GPU-aware demos, and the provided example scripts now raise informative errors when PyTorch is missing so the rest of the library can be imported with only NumPy installed.
+- `kompute`/`kp` is optional and currently used only by planning helpers in `src/evolvo/kompute.py` (operation-to-kernel composition, type matching, persistent/transient buffer planning). Runtime shader compilation/execution is intentionally not implemented yet.
 
 ## GFSL slot semantics and validity
 - Instruction layout: fixed per genome, default is 7 slots (2-slot address + op + 2-slot address + 2-slot address), auto-sized to the maximum declared expression length.
@@ -94,3 +96,5 @@ Quick guidance for AI assistants working in this repository.
 ## Roadmap / next steps
 - Operation conversion table (map ops to alternatives per device profile using weights).
 - Add recursion-guard stress tests (`max_call_depth`) and activity-pruning policy sweeps.
+- Connect `GFSLKomputePlanner` plans to a concrete runtime executor (`GFSLKomputeRuntime.compile/execute`) with explicit host<->VRAM transfer policy and persistent buffer reuse between generations.
+- Add per-operation Kompute bindings for custom ops registered at runtime (including context-aware validation when custom op signatures/types change).

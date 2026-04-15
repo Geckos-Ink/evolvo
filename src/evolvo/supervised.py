@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import random
 from collections import defaultdict, deque
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -357,11 +357,76 @@ class GFSLSupervisedGuide:
 
         self.hidden_layers_current: List[int] = []
         self.dropout_current: float = 0.0
+        self.train_calls: int = 0
+        self.predict_calls: int = 0
+        self.last_train_tensor_device: str = str(self.device)
+        self.last_predict_tensor_device: str = str(self.device)
+        self.runtime_probe: Dict[str, Any] = {}
         self.model: GFSLSupervisedDirectionModel
         self.optimizer: optim.Optimizer
         initial_layers = self._scaled_hidden_layers(self.min_buffer)
         initial_dropout = self._effective_dropout(self.min_buffer)
         self._rebuild_model(initial_layers, dropout=initial_dropout)
+        self.runtime_probe = self._probe_runtime_device()
+
+    def _probe_runtime_device(self) -> Dict[str, Any]:
+        """Run a tiny torch op on the resolved device and record diagnostics."""
+        probe: Dict[str, Any] = {
+            "requested": str(self.device_requested),
+            "backend": str(self.device_backend),
+            "resolved_device": str(self.device),
+            "accelerator_available": bool(self.accelerator_available),
+            "probe_ok": False,
+            "probe_tensor_device": str(self.device),
+            "error": "",
+        }
+        try:
+            left = torch.randn(256, device=self.device, dtype=torch.float32)
+            right = torch.randn(256, device=self.device, dtype=torch.float32)
+            mixed = (left * right).sum()
+            probe["probe_tensor_device"] = str(mixed.device)
+            if self.device.type == "cuda" and torch.cuda.is_available():
+                cuda_index = (
+                    int(self.device.index)
+                    if self.device.index is not None
+                    else int(torch.cuda.current_device())
+                )
+                probe["cuda_device_index"] = int(cuda_index)
+                probe["cuda_device_name"] = str(torch.cuda.get_device_name(cuda_index))
+                probe["cuda_mem_allocated_bytes"] = int(
+                    torch.cuda.memory_allocated(cuda_index)
+                )
+                probe["cuda_mem_reserved_bytes"] = int(
+                    torch.cuda.memory_reserved(cuda_index)
+                )
+                if getattr(torch.version, "hip", None):
+                    probe["hip_version"] = str(getattr(torch.version, "hip", ""))
+                torch.cuda.synchronize(cuda_index)
+            probe["probe_ok"] = True
+        except Exception as exc:
+            probe["error"] = str(exc)
+        return probe
+
+    def runtime_summary(self) -> Dict[str, Any]:
+        """Compact diagnostics proving where torch tensors are executed."""
+        model_device = str(self.device)
+        try:
+            model_device = str(next(self.model.parameters()).device)
+        except Exception:
+            pass
+        return {
+            "requested_device": str(self.device_requested),
+            "resolved_backend": str(self.device_backend),
+            "resolved_device": str(self.device),
+            "model_device": str(model_device),
+            "accelerator_available": bool(self.accelerator_available),
+            "probe": dict(self.runtime_probe),
+            "trained": bool(self.trained),
+            "train_calls": int(self.train_calls),
+            "predict_calls": int(self.predict_calls),
+            "last_train_tensor_device": str(self.last_train_tensor_device),
+            "last_predict_tensor_device": str(self.last_predict_tensor_device),
+        }
 
     def _scaled_hidden_layers(self, dataset_size: int) -> List[int]:
         dataset = max(1, int(dataset_size))
@@ -486,7 +551,9 @@ class GFSLSupervisedGuide:
         if len(self.buffer) < self.min_buffer:
             return
 
+        self.train_calls += 1
         features = torch.stack(list(self.buffer)).to(self.device)
+        self.last_train_tensor_device = str(features.device)
         targets_tensor = torch.tensor(list(self.targets), dtype=torch.float32, device=self.device)
         dataset_size = int(features.size(0))
 
@@ -571,8 +638,10 @@ class GFSLSupervisedGuide:
         if not self.trained or self.target_mean is None or self.target_std is None:
             return np.full(len(feature_list), np.nan, dtype=np.float32)
 
+        self.predict_calls += 1
         with torch.no_grad():
             stacked = torch.stack(feature_list).to(self.device)
+            self.last_predict_tensor_device = str(stacked.device)
             preds = self.model(stacked)
         preds = preds.cpu().numpy()
         preds = preds * (self.target_std + 1e-6) + self.target_mean

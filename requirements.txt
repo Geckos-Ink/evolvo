@@ -1,2 +1,3 @@
 numpy
 # Optional: install torch for supervised guidance or demos (`pip install torch`)
+# Optional: install Kompute Python bindings for experimental GPU backend (`pip install kp`)

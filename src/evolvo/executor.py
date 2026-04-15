@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+import warnings
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
@@ -38,12 +39,26 @@ class GFSLExecutor:
         max_call_depth: int = 32,
         require_void_external_writes: bool = False,
         track_instruction_activity: bool = True,
+        compute_backend: str = "auto",
+        kompute_warn_on_fallback: bool = True,
+        kompute_fail_hard: bool = False,
+        kompute_keep_vram_state: bool = True,
     ):
         self.allow_function_external_writes = bool(allow_function_external_writes)
         self.allow_nested_functions = bool(allow_nested_functions)
         self.max_call_depth = max(1, int(max_call_depth))
         self.require_void_external_writes = bool(require_void_external_writes)
         self.track_instruction_activity = bool(track_instruction_activity)
+        backend = str(compute_backend).strip().lower()
+        if backend not in {"auto", "cpu", "kompute"}:
+            backend = "auto"
+        self.compute_backend = backend
+        self.kompute_warn_on_fallback = bool(kompute_warn_on_fallback)
+        self.kompute_fail_hard = bool(kompute_fail_hard)
+        self.kompute_keep_vram_state = bool(kompute_keep_vram_state)
+        self._kompute_runtime: Any = None
+        self._kompute_runtime_checked = False
+        self._kompute_warned_keys: Set[str] = set()
         self.reset()
 
     @staticmethod
@@ -125,6 +140,15 @@ class GFSLExecutor:
             track_activity: Override activity tracking for this run.
             activity_tick: Optional explicit activity tick to record on the genome.
         """
+        kompute_outputs = self._attempt_kompute_execution(
+            genome,
+            inputs=inputs,
+            track_activity=track_activity,
+            activity_tick=activity_tick,
+        )
+        if kompute_outputs is not None:
+            return kompute_outputs
+
         self.reset()
 
         if inputs:
@@ -191,6 +215,83 @@ class GFSLExecutor:
                 outputs[key] = None if self._is_void(value) else value
 
         return outputs
+
+    def _warn_kompute_fallback_once(self, key: str, message: str) -> None:
+        if not self.kompute_warn_on_fallback:
+            return
+        key_norm = str(key).strip().lower() or "kompute"
+        if key_norm in self._kompute_warned_keys:
+            return
+        self._kompute_warned_keys.add(key_norm)
+        warnings.warn(
+            message,
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+    def _get_kompute_runtime(self) -> Any:
+        if self._kompute_runtime_checked:
+            return self._kompute_runtime
+        self._kompute_runtime_checked = True
+        try:
+            from .kompute import GFSLKomputeRuntime
+        except Exception:
+            self._kompute_runtime = None
+            return None
+        self._kompute_runtime = GFSLKomputeRuntime()
+        return self._kompute_runtime
+
+    def _attempt_kompute_execution(
+        self,
+        genome: GFSLGenome,
+        *,
+        inputs: Optional[Dict[str, Any]],
+        track_activity: Optional[bool],
+        activity_tick: Optional[int],
+    ) -> Optional[Dict[str, Any]]:
+        backend = str(self.compute_backend).strip().lower()
+        if backend == "cpu":
+            return None
+
+        runtime = self._get_kompute_runtime()
+        if runtime is None:
+            if backend == "kompute":
+                message = (
+                    "GFSLExecutor requested `kompute` backend but runtime is unavailable; "
+                    "falling back to CPU execution."
+                )
+                if self.kompute_fail_hard:
+                    raise ModuleNotFoundError(message)
+                self._warn_kompute_fallback_once("import", message)
+            return None
+
+        if not runtime.is_available():
+            if backend == "kompute":
+                message = (
+                    "GFSLExecutor requested `kompute` backend but `kp` is not installed "
+                    "or not usable; falling back to CPU execution."
+                )
+                if self.kompute_fail_hard:
+                    raise ModuleNotFoundError(message)
+                self._warn_kompute_fallback_once("kp-unavailable", message)
+            return None
+
+        try:
+            return runtime.execute(
+                genome,
+                inputs=inputs,
+                track_activity=track_activity,
+                activity_tick=activity_tick,
+                keep_vram_state=bool(self.kompute_keep_vram_state),
+            )
+        except Exception as exc:
+            message = (
+                "Kompute execution failed ({error}); falling back to CPU execution."
+            ).format(error=str(exc))
+            if self.kompute_fail_hard:
+                raise RuntimeError(message) from exc
+            self._warn_kompute_fallback_once("runtime-error", message)
+            return None
 
     def _index_functions(self, genome: GFSLGenome) -> None:
         """Build function definitions and executable function ranges."""

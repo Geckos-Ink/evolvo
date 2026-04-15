@@ -62,6 +62,18 @@ from .supervised import (
     GFSLSupervisedDirectionModel,
     GFSLSupervisedGuide,
 )
+from .kompute import (
+    KomputeTypeSpec,
+    KomputeTypeOverride,
+    KomputeKernelBinding,
+    KomputeBufferRef,
+    KomputeKernelStage,
+    KomputeUnsupportedInstruction,
+    KomputeExecutionPlan,
+    KomputeInstructionRegistry,
+    GFSLKomputePlanner,
+    GFSLKomputeRuntime,
+)
 from .demos import example_formula_discovery, example_neural_architecture_search
 
 __all__ = [
@@ -123,6 +135,16 @@ __all__ = [
     "GFSLFeatureExtractor",
     "GFSLSupervisedDirectionModel",
     "GFSLSupervisedGuide",
+    "KomputeTypeSpec",
+    "KomputeTypeOverride",
+    "KomputeKernelBinding",
+    "KomputeBufferRef",
+    "KomputeKernelStage",
+    "KomputeUnsupportedInstruction",
+    "KomputeExecutionPlan",
+    "KomputeInstructionRegistry",
+    "GFSLKomputePlanner",
+    "GFSLKomputeRuntime",
     "example_formula_discovery",
     "example_neural_architecture_search",
 ]

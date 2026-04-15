@@ -44,9 +44,12 @@ pip install numpy
 
 # install PyTorch if you plan to use the supervised guide, RecursiveModelBuilder, or the torch-backed examples
 pip install torch
+
+# install optional accelerator extras (torch + kompute bindings)
+pip install -r requirements-accelerators.txt
 ```
 
-> The core library only depends on NumPy. PyTorch is optional and only required for supervised guidance, neural architecture assembly, or demos that call `torch`.
+> The core library only depends on NumPy. PyTorch and Kompute (`kp`) are optional accelerators.
 
 If you are running directly from the repo (without installing a package), add the source folder to your Python path:
 
@@ -153,7 +156,7 @@ Practical scripts live in `examples/`:
 | `SlotValidator` | Enforces cascading slot validity and tracks active variables/constants/lists. |
 | `ValueEnumerations` | Operation- and config-specific lookup tables for numeric slots. |
 | `GFSLGenome` | Holds instructions, output declarations, signatures, and operation/effective extraction helpers. |
-| `GFSLExecutor` | Executes only the effective instructions, supports optional function scopes/calls, and records instruction activity. |
+| `GFSLExecutor` | Executes only the effective instructions, supports optional function scopes/calls, records instruction activity, and can attempt experimental Kompute backend with CPU fallback. |
 
 ### Evaluation & Search
 
@@ -171,8 +174,32 @@ Practical scripts live in `examples/`:
   - Learns a regression model (`GFSLSupervisedDirectionModel`) that predicts future fitness.
   - Biases mutation by sampling several candidate offspring and choosing the one with the best predicted fitness.
   - Supports accelerator auto-selection via `resolve_torch_accelerator(...)` with `auto|cpu|cuda|rocm|mps`.
+  - Exposes `runtime_summary()` so you can verify the requested device, resolved backend, probe tensor device, and train/predict call counters.
 
 Both approaches respect GFSL’s fixed-slot constraints; the supervised guide simply tilts the mutation operator toward more promising instruction combinations.
+
+### Experimental Kompute Execution
+
+`GFSLExecutor` supports `compute_backend="auto|cpu|kompute"`:
+
+- `auto` (default): try Kompute only if runtime is available; otherwise use CPU.
+- `kompute`: force Kompute attempt; on runtime/kernel errors it warns and falls back to CPU (unless `kompute_fail_hard=True`).
+- `cpu`: always CPU path.
+
+Example:
+
+```python
+from evolvo import GFSLExecutor
+
+executor = GFSLExecutor(
+    compute_backend="kompute",
+    kompute_warn_on_fallback=True,
+    kompute_fail_hard=False,
+)
+outputs = executor.execute(genome, {"d$0": 3.0})
+```
+
+The current Kompute path is planner-first and still experimental. Unsupported kernels or runtime failures emit a warning and continue on CPU.
 
 ---
 
@@ -379,7 +406,11 @@ from evolvo import (
 test_cases = [{"d$0": float(x)} for x in range(-5, 6)]
 expected = [{"d$1": float(x**2 + 2*x + 1)} for x in range(-5, 6)]
 
-evaluator = RealTimeEvaluator(test_cases, expected)
+evaluator = RealTimeEvaluator(
+    test_cases,
+    expected,
+    executor_kwargs={"compute_backend": "auto"},
+)
 evolver = GFSLEvolver(population_size=30)
 evolver.initialize_population("algorithm", initial_instructions=15)
 
@@ -490,7 +521,49 @@ for genome in evolver.population:
 evolver.evolve(60, evaluator.evaluate)
 best = evolver.population[0]
 print(best.fitness, best.to_human_readable())
+print(guide.runtime_summary())  # verify resolved backend/device and probe status
 ```
+
+If you want to train the guide once per round and reuse it without per-generation retraining:
+
+```python
+guide = GFSLSupervisedGuide(device="rocm")
+evolver = GFSLEvolver(
+    population_size=32,
+    supervised_guide=guide,
+    guide_observe_each_generation=False,
+)
+evolver.initialize_population("algorithm", initial_instructions=12)
+guide.observe_population(evolver.population)  # one warmup/train pass
+evolver.evolve(60, evaluator.evaluate)
+```
+
+### 5. Kompute Planning (Experimental)
+
+Use the Kompute planner to compose GFSL instructions into typed kernel stages with persistent/transient buffer plans.
+
+```python
+from evolvo import (
+    DataType,
+    GFSLKomputePlanner,
+    KomputeInstructionRegistry,
+    KomputeTypeSpec,
+)
+
+registry = KomputeInstructionRegistry()
+registry.set_default_type(DataType.DECIMAL, KomputeTypeSpec("f32", components=1))
+registry.register_binding("PCPL_HASHMIX", shader_key="pcpl.hashmix")
+registry.set_operation_type_override(
+    "PCPL_HASHMIX",
+    target=KomputeTypeSpec("f32", components=1),
+)
+
+planner = GFSLKomputePlanner(registry=registry)
+plan = planner.compose(genome, order="effective", keep_vram_state=True)
+print(plan.to_dict())
+```
+
+The planner is designed for external integrations (such as `pcpl_evolvo`) where custom instructions need explicit kernel mappings and type overrides.
 
 ---
 
