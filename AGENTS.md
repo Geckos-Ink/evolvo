@@ -35,7 +35,7 @@ Quick guidance for AI assistants working in this repository.
 - When running ad-hoc scripts from the repo, set `PYTHONPATH=src` or use the provided scripts that bootstrap the path.
 - `custom_operations` is a global registry; `ValueEnumerations` consults it for custom value enumerations.
 - `src/evolvo/__init__.py` re-exports the public API; prefer `from evolvo import ...`.
-- `GFSLExecutor` supports `compute_backend=auto|cpu|kompute`. `auto` is safest; `kompute` currently attempts experimental path and falls back to CPU with warning on runtime/kernel failures (unless `kompute_fail_hard=True`).
+- `GFSLExecutor` supports `compute_backend=auto|cpu|kompute|kompute-sim`. `auto` is safest; `kompute` attempts native runtime and falls back to CPU on runtime/kernel failures (unless `kompute_fail_hard=True`); `kompute-sim` runs compatibility/planning plus CPU-backed simulated execution.
 - Typed list pointers are supported:
   - Mutable list: `d!0`, `b!1`, `t!0` (`Category.LIST`)
   - Constant list: `d!#0` (`Category.LIST_CONSTANT`, clone-only source)
@@ -52,7 +52,7 @@ Quick guidance for AI assistants working in this repository.
 
 ## Optional dependencies
 - `torch` (including `torch.nn`, `torch.nn.functional`, and `torch.optim`) is optional. The supervised guidance stack (`src/evolvo/supervised.py`), the neural model builder (`src/evolvo/model.py`), GPU-aware demos, and the provided example scripts now raise informative errors when PyTorch is missing so the rest of the library can be imported with only NumPy installed.
-- `kompute`/`kp` is optional and currently used only by planning helpers in `src/evolvo/kompute.py` (operation-to-kernel composition, type matching, persistent/transient buffer planning). Runtime shader compilation/execution is intentionally not implemented yet. If PyPI install fails, prefer source install: `pip install git+https://github.com/KomputeProject/kompute.git`.
+- `kompute`/`kp` is optional. `src/evolvo/kompute.py` provides operation-to-kernel composition, compatibility reports, and simulated runtime execution; native Vulkan shader dispatch remains pending. If PyPI install fails, prefer source install: `pip install git+https://github.com/KomputeProject/kompute.git`.
 
 ## GFSL slot semantics and validity
 - Instruction layout: fixed per genome, default is 7 slots (2-slot address + op + 2-slot address + 2-slot address), auto-sized to the maximum declared expression length.

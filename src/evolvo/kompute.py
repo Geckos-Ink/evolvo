@@ -658,23 +658,54 @@ class GFSLKomputePlanner:
 
 
 class GFSLKomputeRuntime:
-    """Thin runtime facade around the plan composer.
+    """Kompute runtime facade with native or simulated execution modes."""
 
-    The actual Vulkan/Kompute command recording is intentionally left outside
-    this first integration step.
-    """
-
-    def __init__(self, planner: Optional[GFSLKomputePlanner] = None) -> None:
+    def __init__(
+        self,
+        planner: Optional[GFSLKomputePlanner] = None,
+        *,
+        execution_mode: str = "native",
+        allow_auto_simulation_fallback: bool = True,
+    ) -> None:
         self.planner = planner or GFSLKomputePlanner()
+        self.execution_mode = self._normalize_execution_mode(execution_mode)
+        self.allow_auto_simulation_fallback = bool(allow_auto_simulation_fallback)
 
     @staticmethod
-    def is_available() -> bool:
+    def _normalize_execution_mode(mode: str) -> str:
+        mode_norm = str(mode).strip().lower()
+        if mode_norm not in {"native", "simulated", "auto"}:
+            return "native"
+        return mode_norm
+
+    @staticmethod
+    def _has_kp_bindings() -> bool:
         try:
             import kp  # type: ignore
             _ = kp
             return True
         except Exception:
             return False
+
+    def is_available(self) -> bool:
+        mode = self._normalize_execution_mode(self.execution_mode)
+        if mode == "simulated":
+            return True
+        if mode == "native":
+            return self._has_kp_bindings()
+        # auto
+        return bool(self._has_kp_bindings() or self.allow_auto_simulation_fallback)
+
+    def _resolve_execute_mode(self) -> str:
+        mode = self._normalize_execution_mode(self.execution_mode)
+        if mode == "simulated":
+            return "simulated"
+        if mode == "native":
+            return "native"
+        # auto
+        if self._has_kp_bindings():
+            return "native"
+        return "simulated" if self.allow_auto_simulation_fallback else "native"
 
     def compose(
         self,
@@ -714,15 +745,21 @@ class GFSLKomputeRuntime:
             order=order,
             keep_vram_state=keep_vram_state,
         )
-        if not self.is_available():
+        mode = self._resolve_execute_mode()
+        if mode == "native" and not self._has_kp_bindings():
             raise ModuleNotFoundError(
                 "Kompute bindings are not installed (`kp` import failed). "
-                "Plan composition is available, runtime compilation is not."
+                "Plan composition is available, but native runtime compilation is unavailable."
             )
         return {
             "status": "planned",
             "plan": plan.to_dict(),
-            "note": "Runtime shader compilation/execution integration is pending.",
+            "execution_mode": mode,
+            "kp_available": bool(self._has_kp_bindings()),
+            "note": (
+                "Native shader compilation/execution is pending; "
+                "simulated mode reuses CPU execution after Kompute compatibility checks."
+            ),
         }
 
     def execute(
@@ -735,23 +772,12 @@ class GFSLKomputeRuntime:
         order: str = "effective",
         keep_vram_state: bool = True,
     ) -> Dict[str, Any]:
-        """Execute genome through Kompute runtime.
-
-        Notes:
-            This initial integration validates runtime availability and kernel
-            composition, then raises on unsupported kernels/execution path so
-            callers can fallback to CPU safely.
-        """
-        _ = (inputs, track_activity, activity_tick)
+        """Execute genome through native or simulated Kompute runtime."""
         plan = self.compose(
             genome,
             order=order,
             keep_vram_state=keep_vram_state,
         )
-        if not self.is_available():
-            raise ModuleNotFoundError(
-                "Kompute bindings are not installed (`kp` import failed)."
-            )
         if not plan.stages:
             raise RuntimeError("Kompute plan produced no executable stages.")
         if plan.unsupported:
@@ -759,10 +785,66 @@ class GFSLKomputeRuntime:
                 "Kompute plan has unsupported instructions "
                 f"({len(plan.unsupported)} stages unsupported)."
             )
+        mode = self._resolve_execute_mode()
+        if mode == "native":
+            return self._execute_native(
+                genome,
+                plan=plan,
+                inputs=inputs,
+                track_activity=track_activity,
+                activity_tick=activity_tick,
+            )
+        if mode == "simulated":
+            return self._execute_simulated(
+                genome,
+                plan=plan,
+                inputs=inputs,
+                track_activity=track_activity,
+                activity_tick=activity_tick,
+            )
+        raise RuntimeError(
+            f"Unsupported Kompute execution mode `{mode}`."
+        )
 
-        # Placeholder for concrete Vulkan/Kompute command recording.
+    def _execute_native(
+        self,
+        genome: GFSLGenome,
+        *,
+        plan: KomputeExecutionPlan,
+        inputs: Optional[Dict[str, Any]],
+        track_activity: Optional[bool],
+        activity_tick: Optional[int],
+    ) -> Dict[str, Any]:
+        _ = (genome, plan, inputs, track_activity, activity_tick)
+        if not self._has_kp_bindings():
+            raise ModuleNotFoundError(
+                "Kompute bindings are not installed (`kp` import failed)."
+            )
         raise NotImplementedError(
-            "Kompute runtime execution is not implemented yet; planner-only mode is available."
+            "Native Kompute Vulkan dispatch is not implemented yet. "
+            "Use `compute_backend='kompute-sim'` (or runtime `execution_mode='simulated'`) "
+            "to run plan-checked simulated execution."
+        )
+
+    def _execute_simulated(
+        self,
+        genome: GFSLGenome,
+        *,
+        plan: KomputeExecutionPlan,
+        inputs: Optional[Dict[str, Any]],
+        track_activity: Optional[bool],
+        activity_tick: Optional[int],
+    ) -> Dict[str, Any]:
+        _ = plan
+        # Reuse trusted CPU executor semantics while forcing Kompute plan compatibility.
+        from .executor import GFSLExecutor
+
+        cpu_executor = GFSLExecutor(compute_backend="cpu")
+        return cpu_executor.execute(
+            genome,
+            inputs=inputs,
+            track_activity=track_activity,
+            activity_tick=activity_tick,
         )
 
 
