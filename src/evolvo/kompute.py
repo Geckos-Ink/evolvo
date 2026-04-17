@@ -802,7 +802,7 @@ class _NativeKomputeHybridEngine:
         self.kp = kp
         self.executor = executor
         self.keep_vram_state = bool(keep_vram_state)
-        self.manager = kp.Manager()
+        self.manager = self._create_manager_with_fallback()
         self._compiler_path = self._detect_shader_compiler()
         self._tensor_states: Dict[Tuple[int, int, int], _NativeTensorState] = {}
         self._literal_states: Dict[Tuple[str, str], _NativeTensorState] = {}
@@ -821,6 +821,82 @@ class _NativeKomputeHybridEngine:
             if resolved:
                 return resolved
         return None
+
+    @staticmethod
+    def _env_int(name: str) -> Optional[int]:
+        raw = os.environ.get(name)
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except ValueError as exc:
+            raise RuntimeError(f"Invalid integer env {name}={raw!r}") from exc
+
+    def _candidate_device_indices(self) -> List[int]:
+        configured = self._env_int("EVOLVO_KOMPUTE_DEVICE_INDEX")
+        if configured is not None:
+            return [max(0, int(configured))]
+        try:
+            probe = self.kp.Manager(0)
+            listed = probe.list_devices()
+            if isinstance(listed, list) and listed:
+                return list(range(len(listed)))
+        except Exception:
+            pass
+        return [0, 1, 2, 3]
+
+    def _candidate_queue_families(self) -> List[Optional[int]]:
+        configured = self._env_int("EVOLVO_KOMPUTE_QUEUE_FAMILY")
+        if configured is not None:
+            return [max(0, int(configured))]
+        return [None, 0]
+
+    def _probe_manager_sync(self, manager: Any) -> None:
+        tensor = manager.tensor(np.array([1.0], dtype=np.float32))
+        sequence = manager.sequence()
+        sequence.record(self.kp.OpSyncDevice([tensor]))
+        sequence.record(self.kp.OpSyncLocal([tensor]))
+        sequence.eval()
+        _ = float(tensor.data()[0])
+
+    def _build_manager(self, *, device_index: int, queue_family: Optional[int]) -> Any:
+        if queue_family is None:
+            return self.kp.Manager(int(device_index))
+        return self.kp.Manager(
+            device=int(device_index),
+            family_queue_indices=[int(queue_family)],
+            desired_extensions=[],
+        )
+
+    def _create_manager_with_fallback(self) -> Any:
+        errors: List[str] = []
+        for device_index in self._candidate_device_indices():
+            for queue_family in self._candidate_queue_families():
+                queue_text = "default" if queue_family is None else str(int(queue_family))
+                try:
+                    manager = self._build_manager(
+                        device_index=int(device_index),
+                        queue_family=queue_family,
+                    )
+                    self._probe_manager_sync(manager)
+                    return manager
+                except Exception as exc:
+                    errors.append(
+                        "device={device} queue_family={queue} -> {err}".format(
+                            device=int(device_index),
+                            queue=queue_text,
+                            err=str(exc),
+                        )
+                    )
+        detail = "; ".join(errors[-4:]) if errors else "no attempts"
+        raise RuntimeError(
+            "Failed to initialize Kompute Vulkan manager. "
+            "Set EVOLVO_KOMPUTE_DEVICE_INDEX and/or EVOLVO_KOMPUTE_QUEUE_FAMILY. "
+            f"Recent attempts: {detail}"
+        )
 
     def _compile_shader_to_spirv(self, source: str, *, shader_name: str) -> bytes:
         if not self._compiler_path:

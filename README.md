@@ -189,6 +189,7 @@ Both approaches respect GFSL’s fixed-slot constraints; the supervised guide si
 - `kompute-sim`: force Kompute planning/compatibility checks, then execute with simulated runtime (CPU-backed semantics).
 - Native mode dispatches supported scalar stages (`DECIMAL_OPS`, boolean compare/logic) via Vulkan shaders and transparently executes unsupported stages on CPU with synchronized state.
 - Before execution, a compatibility pre-check reports unsupported op names/counts (for example `CALLx1, FUNCx1`) and enables hybrid fallback when needed.
+- If Vulkan picks the wrong device/queue on multi-GPU hosts, set `EVOLVO_KOMPUTE_DEVICE_INDEX` and optionally `EVOLVO_KOMPUTE_QUEUE_FAMILY`.
 - In `auto` mode, Kompute is process-disabled after the first non-recoverable runtime failure to avoid warning spam in large evaluation loops.
 - `cpu`: always CPU path.
 
