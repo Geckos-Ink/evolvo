@@ -379,13 +379,35 @@ class GFSLExecutor:
             self._kompute_support_cache[signature] = (True, "compatible")
 
         try:
-            return runtime.execute(
+            outputs = runtime.execute(
                 genome,
                 inputs=inputs,
                 track_activity=track_activity,
                 activity_tick=activity_tick,
                 keep_vram_state=bool(self.kompute_keep_vram_state),
             )
+            stats = getattr(runtime, "_last_native_stats", None)
+            if forced_backend and isinstance(stats, dict):
+                gpu_dispatch = int(stats.get("gpu_dispatch_count", 0))
+                cpu_fallback = int(stats.get("cpu_fallback_count", 0))
+                if cpu_fallback > 0:
+                    full_sync = int(stats.get("cpu_full_sync_count", 0))
+                    partial_sync = int(stats.get("cpu_partial_sync_count", 0))
+                    no_sync = int(stats.get("cpu_no_sync_count", 0))
+                    synced = int(stats.get("cpu_synced_tensors", 0))
+                    final_sync = int(stats.get("final_sync_count", 0))
+                    message = (
+                        "Kompute hybrid runtime summary for genome signature "
+                        f"`{signature[:16]}`: gpu_dispatch={gpu_dispatch}, "
+                        f"cpu_fallback={cpu_fallback}, "
+                        f"sync(full/partial/none)={full_sync}/{partial_sync}/{no_sync}, "
+                        f"synced_tensors={synced}, final_sync={final_sync}."
+                    )
+                    self._warn_kompute_fallback_once(
+                        f"hybrid-stats:{signature}",
+                        message,
+                    )
+            return outputs
         except TimeoutError:
             raise
         except Exception as exc:
