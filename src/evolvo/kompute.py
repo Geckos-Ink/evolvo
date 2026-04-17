@@ -686,6 +686,10 @@ _SCALAR_POINTER_CATEGORIES = {
     Category.VARIABLE,
     Category.CONSTANT,
 }
+_LIST_POINTER_CATEGORIES = {
+    Category.LIST,
+    Category.LIST_CONSTANT,
+}
 
 _DECIMAL_OP_CODES = {int(op) for op in DECIMAL_OPS}
 _DECIMAL_UNARY_OP_CODES = {
@@ -699,6 +703,7 @@ _DECIMAL_UNARY_OP_CODES = {
 _BOOLEAN_COMPARE_OP_CODES = {int(op) for op in BOOLEAN_COMPARE_OPS}
 _BOOLEAN_LOGIC_OP_CODES = {int(op) for op in BOOLEAN_LOGIC_OPS}
 _BOOLEAN_UNARY_OP_CODES = {int(Operation.NOT)}
+_LIST_QUERY_OP_CODES = {int(Operation.LISTCOUNT), int(Operation.LISTHASITEMS)}
 
 
 def _native_shader_family(op_code: int) -> Optional[str]:
@@ -709,6 +714,8 @@ def _native_shader_family(op_code: int) -> Optional[str]:
         return "boolean.compare"
     if code in _BOOLEAN_LOGIC_OP_CODES:
         return "boolean.logic"
+    if code in _LIST_QUERY_OP_CODES:
+        return "list.query"
     return None
 
 
@@ -747,6 +754,16 @@ def _is_native_shader_compatible_instruction(instruction: GFSLInstruction) -> bo
             return False
         if family in {"boolean.compare", "boolean.logic"} and target_dtype != DataType.BOOLEAN:
             return False
+        if family == "list.query":
+            if op_code == int(Operation.LISTCOUNT) and target_dtype != DataType.DECIMAL:
+                return False
+            if op_code == int(Operation.LISTHASITEMS) and target_dtype != DataType.BOOLEAN:
+                return False
+            source1_cat = Category(int(instruction.source1_cat))
+            if source1_cat not in _LIST_POINTER_CATEGORIES:
+                return False
+            source2_cat = Category(int(instruction.source2_cat))
+            return source2_cat == Category.NONE
 
         source1_cat = Category(int(instruction.source1_cat))
         source1_type = DataType(int(instruction.source1_type))
@@ -866,6 +883,29 @@ void main() {
 }
 """
 
+_LIST_QUERY_SHADER_SOURCE = """#version 450
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(binding = 0) buffer Src1Buffer { float src1[]; };
+layout(binding = 1) buffer Src2Buffer { float src2[]; };
+layout(binding = 2) buffer DstBuffer  { float dst[]; };
+layout(push_constant) uniform PushConstants { float op_code; } push_consts;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    float len_value = src1[i];
+    int op = int(push_consts.op_code + 0.5);
+    float out_value = 0.0;
+
+    switch (op) {
+        case 85: out_value = max(len_value, 0.0); break;
+        case 86: out_value = (len_value > 0.0) ? 1.0 : 0.0; break;
+        default: out_value = 0.0; break;
+    }
+
+    dst[i] = out_value;
+}
+"""
+
 _GLOBAL_SPIRV_SHADER_CACHE: Dict[str, bytes] = {}
 
 
@@ -900,6 +940,7 @@ class _NativeKomputeHybridEngine:
         self.manager = self._create_manager_with_fallback()
         self._compiler_path = self._detect_shader_compiler()
         self._tensor_states: Dict[Tuple[int, int, int], _NativeTensorState] = {}
+        self._list_length_states: Dict[Tuple[int, int, int], _NativeTensorState] = {}
         self._literal_states: Dict[Tuple[str, str], _NativeTensorState] = {}
         self._algorithms: Dict[Tuple[str, int, int, int], Any] = {}
         self._shader_spirv: Dict[str, bytes] = {}
@@ -1117,6 +1158,8 @@ class _NativeKomputeHybridEngine:
             return _BOOLEAN_COMPARE_SHADER_SOURCE
         if family == "boolean.logic":
             return _BOOLEAN_LOGIC_SHADER_SOURCE
+        if family == "list.query":
+            return _LIST_QUERY_SHADER_SOURCE
         raise ValueError(f"Unsupported shader family `{family}`.")
 
     def _shader_spirv_bytes(self, family: str) -> bytes:
@@ -1180,6 +1223,36 @@ class _NativeKomputeHybridEngine:
             return None
         return (int(category), int(dtype), int(index))
 
+    def _list_ref_from_source(
+        self,
+        instruction: GFSLInstruction,
+        source_num: int,
+    ) -> Optional[Tuple[int, int, int]]:
+        if source_num == 1:
+            category = Category(int(instruction.source1_cat))
+            dtype = DataType(int(instruction.source1_type))
+            index = int(instruction.source1_value)
+        else:
+            category = Category(int(instruction.source2_cat))
+            dtype = DataType(int(instruction.source2_type))
+            index = int(instruction.source2_value)
+        if category not in _LIST_POINTER_CATEGORIES:
+            return None
+        return (int(category), int(dtype), int(index))
+
+    def _list_ref_from_target(
+        self,
+        instruction: GFSLInstruction,
+    ) -> Optional[Tuple[int, int, int]]:
+        category = Category(int(instruction.target_cat))
+        if category not in _LIST_POINTER_CATEGORIES:
+            return None
+        return (
+            int(category),
+            int(DataType(int(instruction.target_type))),
+            int(instruction.target_index),
+        )
+
     @staticmethod
     def _float_key(value: float) -> str:
         return f"{float(value):.17g}"
@@ -1218,6 +1291,41 @@ class _NativeKomputeHybridEngine:
         if category == Category.CONSTANT:
             self.executor._write_scoped_value("constants", dtype, index, value)
             return
+
+    def _read_executor_list_length(self, ref: Tuple[int, int, int]) -> float:
+        category = Category(ref[0])
+        dtype = DataType(ref[1])
+        index = int(ref[2])
+        value = self.executor._get_pointer_value(category, dtype, index)
+        if isinstance(value, list):
+            return float(len(value))
+        return 0.0
+
+    def _ensure_list_length_state(self, ref: Tuple[int, int, int]) -> _NativeTensorState:
+        cached = self._list_length_states.get(ref)
+        if cached is not None:
+            return cached
+        length_value = self._read_executor_list_length(ref)
+        tensor = self._make_tensor(np.array([length_value], dtype=np.float32))
+        state = _NativeTensorState(
+            tensor=tensor,
+            category=Category(ref[0]),
+            dtype=DataType.DECIMAL,
+            index=int(ref[2]),
+            host_dirty=True,
+            device_dirty=False,
+            literal=True,
+        )
+        self._list_length_states[ref] = state
+        return state
+
+    def _refresh_list_length_state(self, ref: Tuple[int, int, int]) -> None:
+        state = self._list_length_states.get(ref)
+        if state is None:
+            return
+        state.tensor.data()[0] = float(self._read_executor_list_length(ref))
+        state.host_dirty = True
+        state.device_dirty = False
 
     def _ensure_scalar_state(self, ref: Tuple[int, int, int]) -> _NativeTensorState:
         cached = self._tensor_states.get(ref)
@@ -1277,6 +1385,16 @@ class _NativeKomputeHybridEngine:
         if category == Category.NONE:
             return self._literal_state(0.0)
         return None
+
+    def _list_source_state(
+        self,
+        instruction: GFSLInstruction,
+        source_num: int,
+    ) -> Optional[_NativeTensorState]:
+        ref = self._list_ref_from_source(instruction, source_num)
+        if ref is None:
+            return None
+        return self._ensure_list_length_state(ref)
 
     def _sync_host_to_device(self, states: List[_NativeTensorState]) -> None:
         pending: List[_NativeTensorState] = []
@@ -1444,8 +1562,12 @@ class _NativeKomputeHybridEngine:
         if family is None:
             return False
 
-        source1_state = self._source_state(instruction, 1)
-        source2_state = self._source_state(instruction, 2)
+        if family == "list.query":
+            source1_state = self._list_source_state(instruction, 1)
+            source2_state = self._literal_state(0.0)
+        else:
+            source1_state = self._source_state(instruction, 1)
+            source2_state = self._source_state(instruction, 2)
         if source1_state is None or source2_state is None:
             return False
         target_ref = self._scalar_ref_from_target(instruction)
@@ -1466,26 +1588,35 @@ class _NativeKomputeHybridEngine:
 
     def absorb_cpu_target_update(self, instruction: GFSLInstruction) -> None:
         category = Category(int(instruction.target_cat))
-        if category not in _SCALAR_POINTER_CATEGORIES:
-            return
-        dtype = DataType(int(instruction.target_type))
-        ref = (
-            int(category),
-            int(dtype),
-            int(instruction.target_index),
-        )
-        value = self._read_executor_scalar(ref)
-        state = self._tensor_states.get(ref)
-        if self.executor._is_void(value):
-            if state is not None:
-                state.host_dirty = False
+        if category in _SCALAR_POINTER_CATEGORIES:
+            dtype = DataType(int(instruction.target_type))
+            ref = (
+                int(category),
+                int(dtype),
+                int(instruction.target_index),
+            )
+            value = self._read_executor_scalar(ref)
+            state = self._tensor_states.get(ref)
+            if self.executor._is_void(value):
+                if state is not None:
+                    state.host_dirty = False
+                    state.device_dirty = False
+            else:
+                if state is None:
+                    state = self._ensure_scalar_state(ref)
+                state.tensor.data()[0] = self._coerce_value_to_float(value, dtype=dtype)
+                state.host_dirty = True
                 state.device_dirty = False
-            return
-        if state is None:
-            state = self._ensure_scalar_state(ref)
-        state.tensor.data()[0] = self._coerce_value_to_float(value, dtype=dtype)
-        state.host_dirty = True
-        state.device_dirty = False
+        elif category in _LIST_POINTER_CATEGORIES:
+            target_list_ref = self._list_ref_from_target(instruction)
+            if target_list_ref is not None:
+                self._refresh_list_length_state(target_list_ref)
+
+        op_code = int(instruction.operation)
+        if op_code in {int(Operation.FIFO), int(Operation.FILO)}:
+            source_list_ref = self._list_ref_from_source(instruction, 1)
+            if source_list_ref is not None:
+                self._refresh_list_length_state(source_list_ref)
 
 class GFSLKomputeRuntime:
     """Kompute runtime facade with native or simulated execution modes."""
