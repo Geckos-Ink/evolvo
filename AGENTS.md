@@ -36,6 +36,7 @@ Quick guidance for AI assistants working in this repository.
 - `custom_operations` is a global registry; `ValueEnumerations` consults it for custom value enumerations.
 - `src/evolvo/__init__.py` re-exports the public API; prefer `from evolvo import ...`.
 - `GFSLExecutor` supports `compute_backend=auto|cpu|kompute|kompute-sim`. `auto` is safest; `kompute` attempts native runtime and falls back to CPU on runtime/kernel failures (unless `kompute_fail_hard=True`); `kompute-sim` runs compatibility/planning plus CPU-backed simulated execution.
+- Native Kompute runtime now supports both kp API styles: explicit sync ops (`OpSyncDevice`/`OpSyncLocal`) and shared-memory fallback when those ops are absent.
 - On multi-GPU Vulkan hosts, native Kompute device selection can be overridden with env vars: `EVOLVO_KOMPUTE_DEVICE_INDEX` and `EVOLVO_KOMPUTE_QUEUE_FAMILY`.
 - Typed list pointers are supported:
   - Mutable list: `d!0`, `b!1`, `t!0` (`Category.LIST`)

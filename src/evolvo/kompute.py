@@ -800,6 +800,15 @@ class _NativeKomputeHybridEngine:
         import kp  # type: ignore
 
         self.kp = kp
+        self._sync_device_op = getattr(kp, "OpSyncDevice", None)
+        self._sync_local_op = getattr(kp, "OpSyncLocal", None)
+        self._has_sync_ops = bool(
+            self._sync_device_op is not None and self._sync_local_op is not None
+        )
+        self._shared_memory_type = self._shared_memory_type_for_kp(kp)
+        self._use_shared_memory_tensors = bool(
+            (not self._has_sync_ops) and (self._shared_memory_type is not None)
+        )
         self.executor = executor
         self.keep_vram_state = bool(keep_vram_state)
         self.manager = self._create_manager_with_fallback()
@@ -808,6 +817,11 @@ class _NativeKomputeHybridEngine:
         self._literal_states: Dict[Tuple[str, str], _NativeTensorState] = {}
         self._algorithms: Dict[Tuple[str, int, int, int], Any] = {}
         self._shader_spirv: Dict[str, bytes] = {}
+        if (not self._has_sync_ops) and self._shared_memory_type is None:
+            raise RuntimeError(
+                "kp build does not expose OpSyncDevice/OpSyncLocal and has no shared memory type "
+                "(MemoryTypes.deviceAndHost/host)."
+            )
 
     @staticmethod
     def _detect_shader_compiler() -> Optional[str]:
@@ -820,6 +834,19 @@ class _NativeKomputeHybridEngine:
             resolved = shutil.which(candidate)
             if resolved:
                 return resolved
+        return None
+
+    @staticmethod
+    def _shared_memory_type_for_kp(kp_module: Any) -> Optional[Any]:
+        memory_types = getattr(kp_module, "MemoryTypes", None)
+        if memory_types is not None and hasattr(memory_types, "deviceAndHost"):
+            return memory_types.deviceAndHost
+        if memory_types is not None and hasattr(memory_types, "host"):
+            return memory_types.host
+        if hasattr(kp_module, "deviceAndHost"):
+            return getattr(kp_module, "deviceAndHost")
+        if hasattr(kp_module, "host"):
+            return getattr(kp_module, "host")
         return None
 
     @staticmethod
@@ -855,12 +882,28 @@ class _NativeKomputeHybridEngine:
         return [None, 0]
 
     def _probe_manager_sync(self, manager: Any) -> None:
-        tensor = manager.tensor(np.array([1.0], dtype=np.float32))
-        sequence = manager.sequence()
-        sequence.record(self.kp.OpSyncDevice([tensor]))
-        sequence.record(self.kp.OpSyncLocal([tensor]))
-        sequence.eval()
-        _ = float(tensor.data()[0])
+        if self._has_sync_ops:
+            tensor = manager.tensor(np.array([1.0], dtype=np.float32))
+            sequence = manager.sequence()
+            sequence.record(self._sync_device_op([tensor]))  # type: ignore[misc]
+            sequence.record(self._sync_local_op([tensor]))  # type: ignore[misc]
+            sequence.eval()
+            _ = float(tensor.data()[0])
+            return
+        if self._shared_memory_type is not None:
+            tensor = manager.tensor(
+                np.array([1.0], dtype=np.float32),
+                self._shared_memory_type,
+            )
+            manager.sequence().eval()
+            _ = float(tensor.data()[0])
+            return
+        manager.sequence().eval()
+
+    def _make_tensor(self, values: np.ndarray) -> Any:
+        if self._use_shared_memory_tensors and self._shared_memory_type is not None:
+            return self.manager.tensor(values, self._shared_memory_type)
+        return self.manager.tensor(values)
 
     def _build_manager(self, *, device_index: int, queue_family: Optional[int]) -> Any:
         if queue_family is None:
@@ -1107,7 +1150,7 @@ class _NativeKomputeHybridEngine:
         index = int(ref[2])
         host_value = self._read_executor_scalar(ref)
         initial_value = self._coerce_value_to_float(host_value, dtype=dtype)
-        tensor = self.manager.tensor(np.array([initial_value], dtype=np.float32))
+        tensor = self._make_tensor(np.array([initial_value], dtype=np.float32))
         state = _NativeTensorState(
             tensor=tensor,
             category=category,
@@ -1125,7 +1168,7 @@ class _NativeKomputeHybridEngine:
         cached = self._literal_states.get(key)
         if cached is not None:
             return cached
-        tensor = self.manager.tensor(np.array([float(value)], dtype=np.float32))
+        tensor = self._make_tensor(np.array([float(value)], dtype=np.float32))
         state = _NativeTensorState(
             tensor=tensor,
             category=Category.VALUE,
@@ -1170,9 +1213,10 @@ class _NativeKomputeHybridEngine:
             pending.append(state)
         if not pending:
             return
-        sequence = self.manager.sequence()
-        sequence.record(self.kp.OpSyncDevice([state.tensor for state in pending]))
-        sequence.eval()
+        if self._has_sync_ops:
+            sequence = self.manager.sequence()
+            sequence.record(self._sync_device_op([state.tensor for state in pending]))  # type: ignore[misc]
+            sequence.eval()
         for state in pending:
             state.host_dirty = False
 
@@ -1189,9 +1233,10 @@ class _NativeKomputeHybridEngine:
             pending.append(state)
         if not pending:
             return
-        sequence = self.manager.sequence()
-        sequence.record(self.kp.OpSyncLocal([state.tensor for state in pending]))
-        sequence.eval()
+        if self._has_sync_ops:
+            sequence = self.manager.sequence()
+            sequence.record(self._sync_local_op([state.tensor for state in pending]))  # type: ignore[misc]
+            sequence.eval()
         for state in pending:
             state.device_dirty = False
             if state.literal:
