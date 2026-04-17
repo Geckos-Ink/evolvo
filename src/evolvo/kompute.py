@@ -800,8 +800,7 @@ class _NativeKomputeHybridEngine:
         import kp  # type: ignore
 
         self.kp = kp
-        self._sync_device_op = getattr(kp, "OpSyncDevice", None)
-        self._sync_local_op = getattr(kp, "OpSyncLocal", None)
+        self._sync_device_op, self._sync_local_op = self._sync_ops_for_kp(kp)
         self._has_sync_ops = bool(
             self._sync_device_op is not None and self._sync_local_op is not None
         )
@@ -819,7 +818,8 @@ class _NativeKomputeHybridEngine:
         self._shader_spirv: Dict[str, bytes] = {}
         if (not self._has_sync_ops) and self._shared_memory_type is None:
             raise RuntimeError(
-                "kp build does not expose OpSyncDevice/OpSyncLocal and has no shared memory type "
+                "kp build does not expose sync ops (OpSyncDevice/OpSyncLocal or "
+                "OpTensorSyncDevice/OpTensorSyncLocal) and has no shared memory type "
                 "(MemoryTypes.deviceAndHost/host)."
             )
 
@@ -850,6 +850,31 @@ class _NativeKomputeHybridEngine:
         return None
 
     @staticmethod
+    def _sync_ops_for_kp(kp_module: Any) -> Tuple[Optional[Any], Optional[Any]]:
+        sync_device = getattr(kp_module, "OpSyncDevice", None)
+        sync_local = getattr(kp_module, "OpSyncLocal", None)
+        if sync_device is None:
+            sync_device = getattr(kp_module, "OpTensorSyncDevice", None)
+        if sync_local is None:
+            sync_local = getattr(kp_module, "OpTensorSyncLocal", None)
+        return sync_device, sync_local
+
+    @staticmethod
+    def _vulkan_device_sort_key(index: int, descriptor: Any) -> Tuple[int, int, int]:
+        name = ""
+        if isinstance(descriptor, dict):
+            name = str(descriptor.get("device_name", ""))
+        elif descriptor is not None:
+            name = str(descriptor)
+        name_lc = name.strip().lower()
+        is_software = any(
+            token in name_lc for token in ("llvmpipe", "lavapipe", "swiftshader", "software")
+        )
+        looks_amd = any(token in name_lc for token in ("amd", "radeon", "navi", "gfx"))
+        # Prefer hardware accelerators over software ICDs; among hardware devices, favor AMD names.
+        return (1 if is_software else 0, 0 if looks_amd else 1, int(index))
+
+    @staticmethod
     def _env_int(name: str) -> Optional[int]:
         raw = os.environ.get(name)
         if raw is None:
@@ -870,7 +895,11 @@ class _NativeKomputeHybridEngine:
             probe = self.kp.Manager(0)
             listed = probe.list_devices()
             if isinstance(listed, list) and listed:
-                return list(range(len(listed)))
+                ranked = sorted(
+                    list(enumerate(listed)),
+                    key=lambda item: self._vulkan_device_sort_key(int(item[0]), item[1]),
+                )
+                return [int(idx) for idx, _item in ranked]
         except Exception:
             pass
         return [0, 1, 2, 3]
@@ -895,10 +924,10 @@ class _NativeKomputeHybridEngine:
                 np.array([1.0], dtype=np.float32),
                 self._shared_memory_type,
             )
-            manager.sequence().eval()
+            # Avoid empty sequence eval(): certain AMD Vulkan stacks can stall on this call.
             _ = float(tensor.data()[0])
             return
-        manager.sequence().eval()
+        # No sync API and no shared tensors: manager creation itself is the lightweight probe.
 
     def _make_tensor(self, values: np.ndarray) -> Any:
         if self._use_shared_memory_tensors and self._shared_memory_type is not None:
