@@ -894,7 +894,8 @@ class _NativeKomputeHybridEngine:
         detail = "; ".join(errors[-4:]) if errors else "no attempts"
         raise RuntimeError(
             "Failed to initialize Kompute Vulkan manager. "
-            "Set EVOLVO_KOMPUTE_DEVICE_INDEX and/or EVOLVO_KOMPUTE_QUEUE_FAMILY. "
+            "Set EVOLVO_KOMPUTE_DEVICE_INDEX and/or EVOLVO_KOMPUTE_QUEUE_FAMILY "
+            "(or run pcpl-evolvo `--kompute-check-libs`). "
             f"Recent attempts: {detail}"
         )
 
