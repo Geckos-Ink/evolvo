@@ -45,7 +45,7 @@ pip install numpy
 # install PyTorch if you plan to use the supervised guide, RecursiveModelBuilder, or the torch-backed examples
 pip install torch
 
-# install optional accelerator extras (torch + kompute bindings from source)
+# install optional accelerator extras (torch + kp/kompute bindings)
 pip install -r requirements-accelerators.txt
 ```
 
@@ -186,8 +186,9 @@ Both approaches respect GFSL’s fixed-slot constraints; the supervised guide si
 
 - `auto` (default): try Kompute only if runtime is available; otherwise use CPU.
 - `kompute`: force Kompute attempt; on runtime/kernel errors it warns and falls back to CPU (unless `kompute_fail_hard=True`).
-- `kompute-sim`: force Kompute planning/compatibility checks, then execute with simulated runtime (CPU-backed semantics, no Vulkan dispatch).
-- Before execution, a compatibility pre-check reports unsupported op names/counts (for example `CALLx1, FUNCx1`) and falls back cleanly.
+- `kompute-sim`: force Kompute planning/compatibility checks, then execute with simulated runtime (CPU-backed semantics).
+- Native mode dispatches supported scalar stages (`DECIMAL_OPS`, boolean compare/logic) via Vulkan shaders and transparently executes unsupported stages on CPU with synchronized state.
+- Before execution, a compatibility pre-check reports unsupported op names/counts (for example `CALLx1, FUNCx1`) and enables hybrid fallback when needed.
 - In `auto` mode, Kompute is process-disabled after the first non-recoverable runtime failure to avoid warning spam in large evaluation loops.
 - `cpu`: always CPU path.
 
@@ -204,8 +205,8 @@ executor = GFSLExecutor(
 outputs = executor.execute(genome, {"d$0": 3.0})
 ```
 
-The current Kompute path is planner-first and still experimental. Unsupported kernels or runtime failures emit a warning and continue on CPU.
-Native Vulkan dispatch is not implemented yet; use `kompute-sim` for fast compatibility/planning validation without GPU kernels.
+The Kompute path is planner-first and still experimental. Unsupported kernels or runtime failures emit a warning and continue on CPU fallback.
+Use `kompute-sim` for fast compatibility/planning validation without native Vulkan dispatch.
 
 ---
 

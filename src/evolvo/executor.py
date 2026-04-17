@@ -338,11 +338,23 @@ class GFSLExecutor:
 
         unsupported_count = int(getattr(report, "unsupported_count", 0))
         stage_count = int(getattr(report, "stage_count", 0))
-        supported = bool(getattr(report, "supported", False))
         unsupported_by_operation = getattr(report, "unsupported_by_operation", {})
         if not isinstance(unsupported_by_operation, dict):
             unsupported_by_operation = {}
-        if not supported:
+        if stage_count <= 0:
+            reason = "stages=0"
+            self._kompute_support_cache[signature] = (False, reason)
+            if forced_backend:
+                message = (
+                    "Kompute compatibility pre-check found no GPU-dispatchable stages for "
+                    f"genome signature `{signature[:16]}`; falling back to CPU execution."
+                )
+                if self.kompute_fail_hard:
+                    raise RuntimeError(message)
+                self._warn_kompute_fallback_once(f"unsupported:{signature}", message)
+            return None
+
+        if unsupported_count > 0:
             top = sorted(
                 (
                     (str(name), int(count))
@@ -355,18 +367,16 @@ class GFSLExecutor:
             reason = (
                 f"stages={stage_count}, unsupported={unsupported_count}, top=[{top_text}]"
             )
-            self._kompute_support_cache[signature] = (False, reason)
+            self._kompute_support_cache[signature] = (True, f"partial:{reason}")
             if forced_backend:
                 message = (
-                    "Kompute compatibility pre-check failed for genome signature "
-                    f"`{signature[:16]}` ({reason}); falling back to CPU execution."
+                    "Kompute compatibility pre-check indicates partial native coverage for "
+                    f"genome signature `{signature[:16]}` ({reason}); unsupported stages "
+                    "will run on CPU fallback."
                 )
-                if self.kompute_fail_hard:
-                    raise RuntimeError(message)
-                self._warn_kompute_fallback_once(f"unsupported:{signature}", message)
-            return None
-
-        self._kompute_support_cache[signature] = (True, "compatible")
+                self._warn_kompute_fallback_once("partial-coverage", message)
+        else:
+            self._kompute_support_cache[signature] = (True, "compatible")
 
         try:
             return runtime.execute(
@@ -376,6 +386,8 @@ class GFSLExecutor:
                 activity_tick=activity_tick,
                 keep_vram_state=bool(self.kompute_keep_vram_state),
             )
+        except TimeoutError:
+            raise
         except Exception as exc:
             message = (
                 "Kompute execution failed ({error}); falling back to CPU execution."

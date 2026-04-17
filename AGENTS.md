@@ -52,7 +52,7 @@ Quick guidance for AI assistants working in this repository.
 
 ## Optional dependencies
 - `torch` (including `torch.nn`, `torch.nn.functional`, and `torch.optim`) is optional. The supervised guidance stack (`src/evolvo/supervised.py`), the neural model builder (`src/evolvo/model.py`), GPU-aware demos, and the provided example scripts now raise informative errors when PyTorch is missing so the rest of the library can be imported with only NumPy installed.
-- `kompute`/`kp` is optional. `src/evolvo/kompute.py` provides operation-to-kernel composition, compatibility reports, and simulated runtime execution; native Vulkan shader dispatch remains pending. If PyPI install fails, prefer source install: `pip install git+https://github.com/KomputeProject/kompute.git`.
+- `kompute`/`kp` is optional. `src/evolvo/kompute.py` provides operation-to-kernel composition, compatibility reports, simulated execution, and native Vulkan dispatch for supported scalar op families with synchronized CPU fallback for unsupported stages. If PyPI install fails, prefer source install: `pip install git+https://github.com/KomputeProject/kompute.git`.
 
 ## GFSL slot semantics and validity
 - Instruction layout: fixed per genome, default is 7 slots (2-slot address + op + 2-slot address + 2-slot address), auto-sized to the maximum declared expression length.
@@ -96,5 +96,5 @@ Quick guidance for AI assistants working in this repository.
 ## Roadmap / next steps
 - Operation conversion table (map ops to alternatives per device profile using weights).
 - Add recursion-guard stress tests (`max_call_depth`) and activity-pruning policy sweeps.
-- Connect `GFSLKomputePlanner` plans to a concrete runtime executor (`GFSLKomputeRuntime.compile/execute`) with explicit host<->VRAM transfer policy and persistent buffer reuse between generations.
+- Expand native Kompute coverage beyond scalar decimal/boolean kernels (lists/tensors/control-flow-aware lowering and lower-overhead persistent dispatch across repeated evaluations).
 - Add per-operation Kompute bindings for custom ops registered at runtime (including context-aware validation when custom op signatures/types change).

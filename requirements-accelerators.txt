@@ -1,3 +1,5 @@
 -r requirements.txt
 torch
-git+https://github.com/KomputeProject/kompute.git
+kp>=0.9.0
+# If the wheel is unavailable for your platform, fallback:
+# git+https://github.com/KomputeProject/kompute.git

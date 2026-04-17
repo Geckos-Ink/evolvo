@@ -8,7 +8,14 @@ plan can be produced even on systems where Kompute is not installed.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
+import os
+import shutil
+import subprocess
+import tempfile
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+
+import numpy as np
 
 from .custom_ops import custom_operations, infer_source_type, resolve_operation_name
 from .enums import (
@@ -25,6 +32,7 @@ from .enums import (
 )
 from .genome import GFSLGenome
 from .instruction import GFSLInstruction
+from .values import ValueEnumerations
 
 
 _CONTROL_FLOW_OPS = {
@@ -657,6 +665,561 @@ class GFSLKomputePlanner:
             return False
 
 
+_SCALAR_POINTER_CATEGORIES = {
+    Category.VARIABLE,
+    Category.CONSTANT,
+}
+
+_DECIMAL_OP_CODES = {int(op) for op in DECIMAL_OPS}
+_DECIMAL_UNARY_OP_CODES = {
+    int(Operation.SQRT),
+    int(Operation.ABS),
+    int(Operation.SIN),
+    int(Operation.COS),
+    int(Operation.EXP),
+    int(Operation.LOG),
+}
+_BOOLEAN_COMPARE_OP_CODES = {int(op) for op in BOOLEAN_COMPARE_OPS}
+_BOOLEAN_LOGIC_OP_CODES = {int(op) for op in BOOLEAN_LOGIC_OPS}
+_BOOLEAN_UNARY_OP_CODES = {int(Operation.NOT)}
+
+_DECIMAL_SHADER_SOURCE = """#version 450
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(binding = 0) buffer Src1Buffer { float src1[]; };
+layout(binding = 1) buffer Src2Buffer { float src2[]; };
+layout(binding = 2) buffer DstBuffer  { float dst[]; };
+layout(push_constant) uniform PushConstants { float op_code; } push_consts;
+
+const float EPS = 1e-9;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    float a = src1[i];
+    float b = src2[i];
+    int op = int(push_consts.op_code + 0.5);
+    float out_value = a;
+
+    switch (op) {
+        case 30: out_value = a + b; break;
+        case 31: out_value = a - b; break;
+        case 32: out_value = a * b; break;
+        case 33: out_value = (abs(b) > EPS) ? (a / b) : 0.0; break;
+        case 34: {
+            float rounded = round(b);
+            bool exponent_is_integer = abs(b - rounded) <= EPS;
+            out_value = (a < 0.0 && !exponent_is_integer) ? 0.0 : pow(a, b);
+            break;
+        }
+        case 35: out_value = (a >= 0.0) ? sqrt(a) : 0.0; break;
+        case 36: out_value = abs(a); break;
+        case 37: out_value = sin(a); break;
+        case 38: out_value = cos(a); break;
+        case 39: out_value = exp(clamp(a, -80.0, 80.0)); break;
+        case 40: out_value = (a > EPS) ? log(a) : -100.0; break;
+        case 41: out_value = (abs(b) > EPS) ? mod(a, b) : 0.0; break;
+        default: out_value = a; break;
+    }
+
+    dst[i] = out_value;
+}
+"""
+
+_BOOLEAN_COMPARE_SHADER_SOURCE = """#version 450
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(binding = 0) buffer Src1Buffer { float src1[]; };
+layout(binding = 1) buffer Src2Buffer { float src2[]; };
+layout(binding = 2) buffer DstBuffer  { float dst[]; };
+layout(push_constant) uniform PushConstants { float op_code; } push_consts;
+
+const float EPS = 1e-9;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    float a = src1[i];
+    float b = src2[i];
+    int op = int(push_consts.op_code + 0.5);
+    float out_value = 0.0;
+
+    switch (op) {
+        case 10: out_value = (a > b) ? 1.0 : 0.0; break;
+        case 11: out_value = (a < b) ? 1.0 : 0.0; break;
+        case 12: out_value = (abs(a - b) < EPS) ? 1.0 : 0.0; break;
+        case 13: out_value = (a >= b) ? 1.0 : 0.0; break;
+        case 14: out_value = (a <= b) ? 1.0 : 0.0; break;
+        case 15: out_value = (abs(a - b) >= EPS) ? 1.0 : 0.0; break;
+        default: out_value = 0.0; break;
+    }
+
+    dst[i] = out_value;
+}
+"""
+
+_BOOLEAN_LOGIC_SHADER_SOURCE = """#version 450
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(binding = 0) buffer Src1Buffer { float src1[]; };
+layout(binding = 1) buffer Src2Buffer { float src2[]; };
+layout(binding = 2) buffer DstBuffer  { float dst[]; };
+layout(push_constant) uniform PushConstants { float op_code; } push_consts;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    bool a = src1[i] != 0.0;
+    bool b = src2[i] != 0.0;
+    int op = int(push_consts.op_code + 0.5);
+    float out_value = 0.0;
+
+    switch (op) {
+        case 16: out_value = (a && b) ? 1.0 : 0.0; break;
+        case 17: out_value = (a || b) ? 1.0 : 0.0; break;
+        case 18: out_value = (!a) ? 1.0 : 0.0; break;
+        default: out_value = 0.0; break;
+    }
+
+    dst[i] = out_value;
+}
+"""
+
+_GLOBAL_SPIRV_SHADER_CACHE: Dict[str, bytes] = {}
+
+
+@dataclass
+class _NativeTensorState:
+    tensor: Any
+    category: Category
+    dtype: DataType
+    index: int
+    host_dirty: bool = False
+    device_dirty: bool = False
+    literal: bool = False
+
+
+class _NativeKomputeHybridEngine:
+    """Hybrid scalar dispatcher: Vulkan for supported ops, CPU fallback otherwise."""
+
+    def __init__(self, executor: Any, *, keep_vram_state: bool) -> None:
+        import kp  # type: ignore
+
+        self.kp = kp
+        self.executor = executor
+        self.keep_vram_state = bool(keep_vram_state)
+        self.manager = kp.Manager()
+        self._compiler_path = self._detect_shader_compiler()
+        self._tensor_states: Dict[Tuple[int, int, int], _NativeTensorState] = {}
+        self._literal_states: Dict[Tuple[str, str], _NativeTensorState] = {}
+        self._algorithms: Dict[Tuple[str, int, int, int], Any] = {}
+        self._shader_spirv: Dict[str, bytes] = {}
+
+    @staticmethod
+    def _detect_shader_compiler() -> Optional[str]:
+        env_path = os.environ.get("EVOLVO_GLSL_COMPILER", "").strip()
+        if env_path:
+            expanded = os.path.expanduser(env_path)
+            if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+                return expanded
+        for candidate in ("glslangValidator", "glslc"):
+            resolved = shutil.which(candidate)
+            if resolved:
+                return resolved
+        return None
+
+    def _compile_shader_to_spirv(self, source: str, *, shader_name: str) -> bytes:
+        if not self._compiler_path:
+            raise RuntimeError(
+                "No GLSL compiler found. Install `glslangValidator` or `glslc`, "
+                "or set `EVOLVO_GLSL_COMPILER`."
+            )
+        compiler = os.path.basename(self._compiler_path)
+        with tempfile.TemporaryDirectory(prefix="evolvo-kompute-") as tmp_dir:
+            src_path = os.path.join(tmp_dir, f"{shader_name}.comp")
+            spv_path = os.path.join(tmp_dir, f"{shader_name}.spv")
+            with open(src_path, "w", encoding="utf-8") as handle:
+                handle.write(source)
+            if compiler == "glslc":
+                cmd = [
+                    self._compiler_path,
+                    src_path,
+                    "-o",
+                    spv_path,
+                    "-fshader-stage=compute",
+                ]
+            else:
+                cmd = [
+                    self._compiler_path,
+                    "-V",
+                    "-S",
+                    "comp",
+                    src_path,
+                    "-o",
+                    spv_path,
+                ]
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode != 0:
+                stderr = (proc.stderr or "").strip()
+                stdout = (proc.stdout or "").strip()
+                detail = stderr or stdout or "unknown compiler error"
+                raise RuntimeError(
+                    f"Kompute shader compilation failed for `{shader_name}`: {detail}"
+                )
+            with open(spv_path, "rb") as handle:
+                return handle.read()
+
+    def _shader_source(self, family: str) -> str:
+        if family == "decimal":
+            return _DECIMAL_SHADER_SOURCE
+        if family == "boolean.compare":
+            return _BOOLEAN_COMPARE_SHADER_SOURCE
+        if family == "boolean.logic":
+            return _BOOLEAN_LOGIC_SHADER_SOURCE
+        raise ValueError(f"Unsupported shader family `{family}`.")
+
+    def _shader_spirv_bytes(self, family: str) -> bytes:
+        global_cached = _GLOBAL_SPIRV_SHADER_CACHE.get(family)
+        if global_cached is not None:
+            self._shader_spirv[family] = global_cached
+            return global_cached
+        cached = self._shader_spirv.get(family)
+        if cached is not None:
+            return cached
+        source = self._shader_source(family)
+        compiled = self._compile_shader_to_spirv(source, shader_name=f"gfsl_{family.replace('.', '_')}")
+        _GLOBAL_SPIRV_SHADER_CACHE[family] = compiled
+        self._shader_spirv[family] = compiled
+        return compiled
+
+    @staticmethod
+    def _op_shader_family(op_code: int) -> Optional[str]:
+        code = int(op_code)
+        if code in _DECIMAL_OP_CODES:
+            return "decimal"
+        if code in _BOOLEAN_COMPARE_OP_CODES:
+            return "boolean.compare"
+        if code in _BOOLEAN_LOGIC_OP_CODES:
+            return "boolean.logic"
+        return None
+
+    @staticmethod
+    def _is_unary_op(op_code: int) -> bool:
+        code = int(op_code)
+        return bool(code in _DECIMAL_UNARY_OP_CODES or code in _BOOLEAN_UNARY_OP_CODES)
+
+    def can_dispatch(self, instruction: GFSLInstruction) -> bool:
+        op_code = int(instruction.operation)
+        family = self._op_shader_family(op_code)
+        if family is None:
+            return False
+
+        target_cat = Category(int(instruction.target_cat))
+        if target_cat not in _SCALAR_POINTER_CATEGORIES:
+            return False
+        target_dtype = DataType(int(instruction.target_type))
+        if family == "decimal" and target_dtype != DataType.DECIMAL:
+            return False
+        if family in {"boolean.compare", "boolean.logic"} and target_dtype != DataType.BOOLEAN:
+            return False
+
+        if not self._is_valid_source_category(
+            Category(int(instruction.source1_cat)),
+            DataType(int(instruction.source1_type)),
+            allow_none=False,
+        ):
+            return False
+
+        source2_cat = Category(int(instruction.source2_cat))
+        source2_type = DataType(int(instruction.source2_type))
+        if self._is_unary_op(op_code):
+            if source2_cat == Category.NONE:
+                return True
+        return self._is_valid_source_category(
+            source2_cat,
+            source2_type,
+            allow_none=self._is_unary_op(op_code),
+        )
+
+    @staticmethod
+    def _is_valid_source_category(
+        category: Category,
+        dtype: DataType,
+        *,
+        allow_none: bool,
+    ) -> bool:
+        if allow_none and category == Category.NONE:
+            return True
+        if category in _SCALAR_POINTER_CATEGORIES:
+            return dtype in {DataType.DECIMAL, DataType.BOOLEAN}
+        if category == Category.VALUE:
+            return True
+        return False
+
+    def _scalar_ref_from_target(
+        self,
+        instruction: GFSLInstruction,
+    ) -> Tuple[int, int, int]:
+        return (
+            int(instruction.target_cat),
+            int(instruction.target_type),
+            int(instruction.target_index),
+        )
+
+    def _scalar_ref_from_source(
+        self,
+        instruction: GFSLInstruction,
+        source_num: int,
+    ) -> Optional[Tuple[int, int, int]]:
+        if source_num == 1:
+            category = Category(int(instruction.source1_cat))
+            dtype = DataType(int(instruction.source1_type))
+            index = int(instruction.source1_value)
+        else:
+            category = Category(int(instruction.source2_cat))
+            dtype = DataType(int(instruction.source2_type))
+            index = int(instruction.source2_value)
+        if category not in _SCALAR_POINTER_CATEGORIES:
+            return None
+        return (int(category), int(dtype), int(index))
+
+    @staticmethod
+    def _float_key(value: float) -> str:
+        return f"{float(value):.17g}"
+
+    def _coerce_value_to_float(self, value: Any, *, dtype: DataType) -> float:
+        if self.executor._is_void(value):
+            return 0.0
+        if dtype == DataType.BOOLEAN:
+            return 1.0 if bool(value) else 0.0
+        try:
+            parsed = float(value)
+        except Exception:
+            return 0.0
+        if math.isnan(parsed) or math.isinf(parsed):
+            return 0.0
+        return float(parsed)
+
+    def _coerce_float_to_host(self, value: float, *, dtype: DataType) -> Any:
+        if dtype == DataType.BOOLEAN:
+            return bool(value != 0.0)
+        return float(value)
+
+    def _read_executor_scalar(self, ref: Tuple[int, int, int]) -> Any:
+        category = Category(ref[0])
+        dtype = DataType(ref[1])
+        index = int(ref[2])
+        return self.executor._get_pointer_value(category, dtype, index)
+
+    def _write_executor_scalar(self, ref: Tuple[int, int, int], value: Any) -> None:
+        category = Category(ref[0])
+        dtype = DataType(ref[1])
+        index = int(ref[2])
+        if category == Category.VARIABLE:
+            self.executor._write_scoped_value("variables", dtype, index, value)
+            return
+        if category == Category.CONSTANT:
+            self.executor._write_scoped_value("constants", dtype, index, value)
+            return
+
+    def _ensure_scalar_state(self, ref: Tuple[int, int, int]) -> _NativeTensorState:
+        cached = self._tensor_states.get(ref)
+        if cached is not None:
+            return cached
+        category = Category(ref[0])
+        dtype = DataType(ref[1])
+        index = int(ref[2])
+        host_value = self._read_executor_scalar(ref)
+        initial_value = self._coerce_value_to_float(host_value, dtype=dtype)
+        tensor = self.manager.tensor(np.array([initial_value], dtype=np.float32))
+        state = _NativeTensorState(
+            tensor=tensor,
+            category=category,
+            dtype=dtype,
+            index=index,
+            host_dirty=True,
+            device_dirty=False,
+            literal=False,
+        )
+        self._tensor_states[ref] = state
+        return state
+
+    def _literal_state(self, value: float) -> _NativeTensorState:
+        key = ("literal", self._float_key(value))
+        cached = self._literal_states.get(key)
+        if cached is not None:
+            return cached
+        tensor = self.manager.tensor(np.array([float(value)], dtype=np.float32))
+        state = _NativeTensorState(
+            tensor=tensor,
+            category=Category.VALUE,
+            dtype=DataType.DECIMAL,
+            index=0,
+            host_dirty=True,
+            device_dirty=False,
+            literal=True,
+        )
+        self._literal_states[key] = state
+        return state
+
+    def _source_state(self, instruction: GFSLInstruction, source_num: int) -> Optional[_NativeTensorState]:
+        if source_num == 1:
+            category = Category(int(instruction.source1_cat))
+        else:
+            category = Category(int(instruction.source2_cat))
+
+        if category in _SCALAR_POINTER_CATEGORIES:
+            ref = self._scalar_ref_from_source(instruction, source_num)
+            if ref is None:
+                return None
+            return self._ensure_scalar_state(ref)
+        if category == Category.VALUE:
+            value = self.executor._get_value(instruction, source_num)
+            value_float = self._coerce_value_to_float(value, dtype=DataType.DECIMAL)
+            return self._literal_state(value_float)
+        if category == Category.NONE:
+            return self._literal_state(0.0)
+        return None
+
+    def _sync_host_to_device(self, states: List[_NativeTensorState]) -> None:
+        pending: List[_NativeTensorState] = []
+        seen = set()
+        for state in states:
+            marker = id(state.tensor)
+            if marker in seen:
+                continue
+            if not state.host_dirty:
+                continue
+            seen.add(marker)
+            pending.append(state)
+        if not pending:
+            return
+        sequence = self.manager.sequence()
+        sequence.record(self.kp.OpSyncDevice([state.tensor for state in pending]))
+        sequence.eval()
+        for state in pending:
+            state.host_dirty = False
+
+    def _sync_device_to_host(self, states: List[_NativeTensorState]) -> None:
+        pending: List[_NativeTensorState] = []
+        seen = set()
+        for state in states:
+            marker = id(state.tensor)
+            if marker in seen:
+                continue
+            if not state.device_dirty:
+                continue
+            seen.add(marker)
+            pending.append(state)
+        if not pending:
+            return
+        sequence = self.manager.sequence()
+        sequence.record(self.kp.OpSyncLocal([state.tensor for state in pending]))
+        sequence.eval()
+        for state in pending:
+            state.device_dirty = False
+            if state.literal:
+                continue
+            host_raw = float(state.tensor.data()[0])
+            host_value = self._coerce_float_to_host(host_raw, dtype=state.dtype)
+            ref = (int(state.category), int(state.dtype), int(state.index))
+            self._write_executor_scalar(ref, host_value)
+
+    def sync_all_device_to_host(self) -> None:
+        dirty = [state for state in self._tensor_states.values() if state.device_dirty]
+        self._sync_device_to_host(dirty)
+
+    def _shader_algorithm(
+        self,
+        family: str,
+        source1: _NativeTensorState,
+        source2: _NativeTensorState,
+        target: _NativeTensorState,
+    ) -> Any:
+        key = (family, id(source1.tensor), id(source2.tensor), id(target.tensor))
+        cached = self._algorithms.get(key)
+        if cached is not None:
+            return cached
+        spirv = self._shader_spirv_bytes(family)
+        algorithm = self.manager.algorithm(
+            [source1.tensor, source2.tensor, target.tensor],
+            spirv,
+            [1, 1, 1],
+            [],
+            [0.0],
+        )
+        self._algorithms[key] = algorithm
+        return algorithm
+
+    def _source_is_void(self, ref: Tuple[int, int, int]) -> bool:
+        state = self._tensor_states.get(ref)
+        if state is not None and state.device_dirty:
+            return False
+        value = self._read_executor_scalar(ref)
+        return bool(self.executor._is_void(value))
+
+    def dispatch_instruction(
+        self,
+        instruction: GFSLInstruction,
+        *,
+        instruction_index: int,
+    ) -> bool:
+        if not self.can_dispatch(instruction):
+            return False
+
+        source1_ref = self._scalar_ref_from_source(instruction, 1)
+        if source1_ref is not None and self._source_is_void(source1_ref):
+            return False
+        source2_ref = self._scalar_ref_from_source(instruction, 2)
+        if source2_ref is not None and self._source_is_void(source2_ref):
+            return False
+
+        op_code = int(instruction.operation)
+        family = self._op_shader_family(op_code)
+        if family is None:
+            return False
+
+        source1_state = self._source_state(instruction, 1)
+        source2_state = self._source_state(instruction, 2)
+        if source1_state is None or source2_state is None:
+            return False
+        target_ref = self._scalar_ref_from_target(instruction)
+        target_state = self._ensure_scalar_state(target_ref)
+
+        self._sync_host_to_device([source1_state, source2_state, target_state])
+        algorithm = self._shader_algorithm(family, source1_state, source2_state, target_state)
+
+        sequence = self.manager.sequence()
+        sequence.record(self.kp.OpAlgoDispatch(algorithm, [float(op_code)]))
+        sequence.eval()
+
+        target_state.device_dirty = True
+        target_state.host_dirty = False
+        self.executor._executed_instruction_indices.add(int(instruction_index))
+        return True
+
+    def absorb_cpu_target_update(self, instruction: GFSLInstruction) -> None:
+        category = Category(int(instruction.target_cat))
+        if category not in _SCALAR_POINTER_CATEGORIES:
+            return
+        dtype = DataType(int(instruction.target_type))
+        ref = (
+            int(category),
+            int(dtype),
+            int(instruction.target_index),
+        )
+        value = self._read_executor_scalar(ref)
+        state = self._tensor_states.get(ref)
+        if self.executor._is_void(value):
+            if state is not None:
+                state.host_dirty = False
+                state.device_dirty = False
+            return
+        if state is None:
+            state = self._ensure_scalar_state(ref)
+        state.tensor.data()[0] = self._coerce_value_to_float(value, dtype=dtype)
+        state.host_dirty = True
+        state.device_dirty = False
+
 class GFSLKomputeRuntime:
     """Kompute runtime facade with native or simulated execution modes."""
 
@@ -757,8 +1320,8 @@ class GFSLKomputeRuntime:
             "execution_mode": mode,
             "kp_available": bool(self._has_kp_bindings()),
             "note": (
-                "Native shader compilation/execution is pending; "
-                "simulated mode reuses CPU execution after Kompute compatibility checks."
+                "Native runtime dispatches supported scalar stages via Vulkan shaders. "
+                "Unsupported stages execute through CPU fallback with state synchronization."
             ),
         }
 
@@ -780,11 +1343,6 @@ class GFSLKomputeRuntime:
         )
         if not plan.stages:
             raise RuntimeError("Kompute plan produced no executable stages.")
-        if plan.unsupported:
-            raise RuntimeError(
-                "Kompute plan has unsupported instructions "
-                f"({len(plan.unsupported)} stages unsupported)."
-            )
         mode = self._resolve_execute_mode()
         if mode == "native":
             return self._execute_native(
@@ -793,6 +1351,8 @@ class GFSLKomputeRuntime:
                 inputs=inputs,
                 track_activity=track_activity,
                 activity_tick=activity_tick,
+                order=order,
+                keep_vram_state=keep_vram_state,
             )
         if mode == "simulated":
             return self._execute_simulated(
@@ -814,17 +1374,125 @@ class GFSLKomputeRuntime:
         inputs: Optional[Dict[str, Any]],
         track_activity: Optional[bool],
         activity_tick: Optional[int],
+        order: str,
+        keep_vram_state: bool,
     ) -> Dict[str, Any]:
-        _ = (genome, plan, inputs, track_activity, activity_tick)
+        _ = plan
         if not self._has_kp_bindings():
             raise ModuleNotFoundError(
                 "Kompute bindings are not installed (`kp` import failed)."
             )
-        raise NotImplementedError(
-            "Native Kompute Vulkan dispatch is not implemented yet. "
-            "Use `compute_backend='kompute-sim'` (or runtime `execution_mode='simulated'`) "
-            "to run plan-checked simulated execution."
+
+        from .executor import GFSLExecutor
+
+        cpu_executor = GFSLExecutor(compute_backend="cpu")
+        self._seed_inputs(cpu_executor, inputs)
+        cpu_executor._index_functions(genome)
+        selected_indices = self._selected_indices(genome, order=order)
+        stage_indices = {int(stage.instruction_index) for stage in plan.stages}
+
+        bridge = _NativeKomputeHybridEngine(
+            cpu_executor,
+            keep_vram_state=keep_vram_state,
         )
+        for idx in cpu_executor._main_execution_indices(selected_indices):
+            if idx < 0 or idx >= len(genome.instructions):
+                continue
+            instruction = genome.instructions[int(idx)]
+            ran_on_gpu = False
+            if int(idx) in stage_indices and bridge.can_dispatch(instruction):
+                try:
+                    ran_on_gpu = bridge.dispatch_instruction(
+                        instruction,
+                        instruction_index=int(idx),
+                    )
+                except Exception:
+                    ran_on_gpu = False
+            if ran_on_gpu:
+                continue
+            bridge.sync_all_device_to_host()
+            cpu_executor._execute_instruction(
+                instruction,
+                genome=genome,
+                instruction_index=int(idx),
+            )
+            bridge.absorb_cpu_target_update(instruction)
+
+        bridge.sync_all_device_to_host()
+
+        should_track = (
+            cpu_executor.track_instruction_activity
+            if track_activity is None
+            else bool(track_activity)
+        )
+        if should_track and cpu_executor._executed_instruction_indices:
+            genome.record_instruction_activity(
+                sorted(cpu_executor._executed_instruction_indices),
+                tick=activity_tick,
+            )
+        return self._collect_outputs(cpu_executor, genome)
+
+    @staticmethod
+    def _selected_indices(genome: GFSLGenome, *, order: str) -> List[int]:
+        if str(order).strip().lower() == "execution":
+            return list(range(len(genome.instructions)))
+        return [int(idx) for idx in genome.extract_effective_algorithm()]
+
+    @staticmethod
+    def _seed_inputs(cpu_executor: Any, inputs: Optional[Dict[str, Any]]) -> None:
+        cpu_executor.reset()
+        if not inputs:
+            return
+        for key, value in inputs.items():
+            dtype_char = str(key)[0].lower() if key else ""
+            if "!#" in key:
+                category = Category.LIST_CONSTANT
+                idx_str = key.split("!#", 1)[1]
+            elif "!" in key:
+                category = Category.LIST
+                idx_str = key.split("!", 1)[1]
+            elif "$" in key:
+                category = Category.VARIABLE
+                idx_str = key.split("$", 1)[1]
+            elif "#" in key:
+                category = Category.CONSTANT
+                idx_str = key.split("#", 1)[1]
+            else:
+                continue
+            try:
+                idx = int(idx_str)
+            except Exception:
+                continue
+
+            dtype = {
+                "b": DataType.BOOLEAN,
+                "d": DataType.DECIMAL,
+                "t": DataType.TENSOR,
+                "n": DataType.NONE,
+            }.get(dtype_char, DataType.DECIMAL)
+
+            if category == Category.CONSTANT:
+                cpu_executor.constants[dtype][idx] = value
+            elif category == Category.VARIABLE:
+                cpu_executor.variables[dtype][idx] = value
+            elif category == Category.LIST:
+                cpu_executor.lists[dtype][idx] = cpu_executor._coerce_list_input(value)
+            elif category == Category.LIST_CONSTANT:
+                cpu_executor.constant_lists[dtype][idx] = cpu_executor._coerce_list_input(value)
+
+    @staticmethod
+    def _collect_outputs(cpu_executor: Any, genome: GFSLGenome) -> Dict[str, Any]:
+        outputs: Dict[str, Any] = {}
+        for category, dtype, idx in genome.outputs:
+            if category == Category.VARIABLE:
+                key = f"{DataType(dtype).name[0].lower()}${idx}"
+                value = cpu_executor.variables[dtype][idx]
+                outputs[key] = None if cpu_executor._is_void(value) else value
+            elif category == Category.CONSTANT:
+                key = f"{DataType(dtype).name[0].lower()}#{idx}"
+                value = cpu_executor.constants[dtype][idx]
+                outputs[key] = None if cpu_executor._is_void(value) else value
+        return outputs
 
     def _execute_simulated(
         self,
