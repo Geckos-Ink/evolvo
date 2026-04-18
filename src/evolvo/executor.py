@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+import threading
 import warnings
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -32,6 +33,9 @@ from .settings import (
 from .values import ValueEnumerations
 
 _GLOBAL_AUTO_KOMPUTE_DISABLE_REASON: Optional[str] = None
+_GLOBAL_KOMPUTE_WARNING_COUNT_BY_BUCKET: Dict[str, int] = defaultdict(int)
+_GLOBAL_KOMPUTE_WARNING_SUPPRESSED_BUCKETS: Set[str] = set()
+_GLOBAL_KOMPUTE_WARNING_LOCK = threading.Lock()
 
 
 @dataclass
@@ -162,6 +166,7 @@ class GFSLExecutor:
         self._kompute_runtime_checked = False
         self._kompute_warned_keys: Set[str] = set()
         self._kompute_support_cache: Dict[str, Tuple[bool, str]] = {}
+        self._kompute_warning_bucket_limit = 24
         self.reset()
 
     @staticmethod
@@ -323,6 +328,39 @@ class GFSLExecutor:
         if not self.kompute_warn_on_fallback:
             return
         key_norm = str(key).strip().lower() or "kompute"
+        bucket = key_norm.split(":", 1)[0]
+        if bucket in {"unsupported", "coverage-policy", "hybrid-stats", "partial-coverage"}:
+            if key_norm in self._kompute_warned_keys:
+                return
+            limit = int(self._kompute_warning_bucket_limit)
+            emit_message = False
+            emit_suppression = False
+            with _GLOBAL_KOMPUTE_WARNING_LOCK:
+                seen = int(_GLOBAL_KOMPUTE_WARNING_COUNT_BY_BUCKET.get(bucket, 0))
+                if seen >= limit:
+                    if bucket not in _GLOBAL_KOMPUTE_WARNING_SUPPRESSED_BUCKETS:
+                        _GLOBAL_KOMPUTE_WARNING_SUPPRESSED_BUCKETS.add(bucket)
+                        emit_suppression = True
+                else:
+                    _GLOBAL_KOMPUTE_WARNING_COUNT_BY_BUCKET[bucket] = seen + 1
+                    emit_message = True
+            self._kompute_warned_keys.add(key_norm)
+            if emit_message:
+                warnings.warn(
+                    message,
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
+            elif emit_suppression:
+                warnings.warn(
+                    (
+                        "Kompute fallback warnings for `{bucket}` reached the process-wide "
+                        "limit ({limit}); suppressing additional unique messages."
+                    ).format(bucket=bucket, limit=limit),
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
+            return
         if key_norm in self._kompute_warned_keys:
             return
         self._kompute_warned_keys.add(key_norm)
