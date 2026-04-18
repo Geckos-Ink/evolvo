@@ -13,6 +13,22 @@ from .custom_ops import custom_operations
 from .enums import Category, ConfigProperty, DataType, Operation
 from .genome import GFSLGenome
 from .instruction import GFSLInstruction
+from .settings import (
+    DEFAULT_COMPUTE_BACKEND,
+    DEFAULT_KOMPUTE_FAIL_HARD,
+    DEFAULT_KOMPUTE_FORCE_CPU_ON_PARTIAL_COVERAGE,
+    DEFAULT_KOMPUTE_KEEP_VRAM_STATE,
+    DEFAULT_KOMPUTE_MAX_UNSUPPORTED_COUNT,
+    DEFAULT_KOMPUTE_MAX_UNSUPPORTED_SHARE,
+    DEFAULT_KOMPUTE_MIN_NATIVE_STAGE_COUNT,
+    DEFAULT_KOMPUTE_MIN_NATIVE_STAGE_SHARE,
+    DEFAULT_KOMPUTE_NATIVE_ENABLE_BOOLEAN_COMPARE,
+    DEFAULT_KOMPUTE_NATIVE_ENABLE_BOOLEAN_LOGIC,
+    DEFAULT_KOMPUTE_NATIVE_ENABLE_DECIMAL,
+    DEFAULT_KOMPUTE_NATIVE_ENABLE_LIST_QUERY,
+    DEFAULT_KOMPUTE_RUNTIME_MODE,
+    DEFAULT_KOMPUTE_WARN_ON_FALLBACK,
+)
 from .values import ValueEnumerations
 
 _GLOBAL_AUTO_KOMPUTE_DISABLE_REASON: Optional[str] = None
@@ -41,28 +57,107 @@ class GFSLExecutor:
         max_call_depth: int = 32,
         require_void_external_writes: bool = False,
         track_instruction_activity: bool = True,
-        compute_backend: str = "auto",
-        kompute_runtime_mode: str = "native",
-        kompute_warn_on_fallback: bool = True,
-        kompute_fail_hard: bool = False,
-        kompute_keep_vram_state: bool = True,
+        compute_backend: Optional[str] = None,
+        kompute_runtime_mode: Optional[str] = None,
+        kompute_warn_on_fallback: Optional[bool] = None,
+        kompute_fail_hard: Optional[bool] = None,
+        kompute_keep_vram_state: Optional[bool] = None,
+        kompute_min_native_stage_count: Optional[int] = None,
+        kompute_min_native_stage_share: Optional[float] = None,
+        kompute_max_unsupported_share: Optional[float] = None,
+        kompute_max_unsupported_count: Optional[int] = None,
+        kompute_force_cpu_on_partial_coverage: Optional[bool] = None,
+        kompute_native_enable_decimal: Optional[bool] = None,
+        kompute_native_enable_boolean_compare: Optional[bool] = None,
+        kompute_native_enable_boolean_logic: Optional[bool] = None,
+        kompute_native_enable_list_query: Optional[bool] = None,
     ):
         self.allow_function_external_writes = bool(allow_function_external_writes)
         self.allow_nested_functions = bool(allow_nested_functions)
         self.max_call_depth = max(1, int(max_call_depth))
         self.require_void_external_writes = bool(require_void_external_writes)
         self.track_instruction_activity = bool(track_instruction_activity)
-        backend = str(compute_backend).strip().lower()
+        backend_raw = DEFAULT_COMPUTE_BACKEND if compute_backend is None else compute_backend
+        backend = str(backend_raw).strip().lower()
         if backend not in {"auto", "cpu", "kompute", "kompute-sim"}:
             backend = "auto"
         self.compute_backend = backend
-        mode = str(kompute_runtime_mode).strip().lower()
+        mode_raw = (
+            DEFAULT_KOMPUTE_RUNTIME_MODE
+            if kompute_runtime_mode is None
+            else kompute_runtime_mode
+        )
+        mode = str(mode_raw).strip().lower()
         if mode not in {"native", "simulated", "auto"}:
             mode = "native"
         self.kompute_runtime_mode = mode
-        self.kompute_warn_on_fallback = bool(kompute_warn_on_fallback)
-        self.kompute_fail_hard = bool(kompute_fail_hard)
-        self.kompute_keep_vram_state = bool(kompute_keep_vram_state)
+        self.kompute_warn_on_fallback = bool(
+            DEFAULT_KOMPUTE_WARN_ON_FALLBACK
+            if kompute_warn_on_fallback is None
+            else kompute_warn_on_fallback
+        )
+        self.kompute_fail_hard = bool(
+            DEFAULT_KOMPUTE_FAIL_HARD
+            if kompute_fail_hard is None
+            else kompute_fail_hard
+        )
+        self.kompute_keep_vram_state = bool(
+            DEFAULT_KOMPUTE_KEEP_VRAM_STATE
+            if kompute_keep_vram_state is None
+            else kompute_keep_vram_state
+        )
+        min_stage_count = (
+            DEFAULT_KOMPUTE_MIN_NATIVE_STAGE_COUNT
+            if kompute_min_native_stage_count is None
+            else int(kompute_min_native_stage_count)
+        )
+        self.kompute_min_native_stage_count = max(0, int(min_stage_count))
+        min_stage_share = (
+            DEFAULT_KOMPUTE_MIN_NATIVE_STAGE_SHARE
+            if kompute_min_native_stage_share is None
+            else float(kompute_min_native_stage_share)
+        )
+        self.kompute_min_native_stage_share = max(0.0, min(1.0, float(min_stage_share)))
+        max_unsupported_share = (
+            DEFAULT_KOMPUTE_MAX_UNSUPPORTED_SHARE
+            if kompute_max_unsupported_share is None
+            else float(kompute_max_unsupported_share)
+        )
+        self.kompute_max_unsupported_share = max(
+            0.0,
+            min(1.0, float(max_unsupported_share)),
+        )
+        max_unsupported_count = (
+            DEFAULT_KOMPUTE_MAX_UNSUPPORTED_COUNT
+            if kompute_max_unsupported_count is None
+            else int(kompute_max_unsupported_count)
+        )
+        self.kompute_max_unsupported_count = int(max(-1, int(max_unsupported_count)))
+        self.kompute_force_cpu_on_partial_coverage = bool(
+            DEFAULT_KOMPUTE_FORCE_CPU_ON_PARTIAL_COVERAGE
+            if kompute_force_cpu_on_partial_coverage is None
+            else kompute_force_cpu_on_partial_coverage
+        )
+        self.kompute_native_enable_decimal = bool(
+            DEFAULT_KOMPUTE_NATIVE_ENABLE_DECIMAL
+            if kompute_native_enable_decimal is None
+            else kompute_native_enable_decimal
+        )
+        self.kompute_native_enable_boolean_compare = bool(
+            DEFAULT_KOMPUTE_NATIVE_ENABLE_BOOLEAN_COMPARE
+            if kompute_native_enable_boolean_compare is None
+            else kompute_native_enable_boolean_compare
+        )
+        self.kompute_native_enable_boolean_logic = bool(
+            DEFAULT_KOMPUTE_NATIVE_ENABLE_BOOLEAN_LOGIC
+            if kompute_native_enable_boolean_logic is None
+            else kompute_native_enable_boolean_logic
+        )
+        self.kompute_native_enable_list_query = bool(
+            DEFAULT_KOMPUTE_NATIVE_ENABLE_LIST_QUERY
+            if kompute_native_enable_list_query is None
+            else kompute_native_enable_list_query
+        )
         self._kompute_runtime: Any = None
         self._kompute_runtime_checked = False
         self._kompute_warned_keys: Set[str] = set()
@@ -251,8 +346,64 @@ class GFSLExecutor:
             runtime_mode = "simulated"
         self._kompute_runtime = GFSLKomputeRuntime(
             execution_mode=runtime_mode,
+            native_enable_decimal=bool(self.kompute_native_enable_decimal),
+            native_enable_boolean_compare=bool(
+                self.kompute_native_enable_boolean_compare
+            ),
+            native_enable_boolean_logic=bool(self.kompute_native_enable_boolean_logic),
+            native_enable_list_query=bool(self.kompute_native_enable_list_query),
         )
         return self._kompute_runtime
+
+    def _kompute_coverage_reject_reason(
+        self,
+        *,
+        stage_count: int,
+        unsupported_count: int,
+    ) -> Optional[str]:
+        stages = max(0, int(stage_count))
+        unsupported = max(0, int(unsupported_count))
+        total = stages + unsupported
+        native_share = (float(stages) / float(total)) if total > 0 else 0.0
+        unsupported_share = (float(unsupported) / float(total)) if total > 0 else 0.0
+
+        if self.kompute_force_cpu_on_partial_coverage and unsupported > 0:
+            return (
+                "partial coverage rejected by policy "
+                "(kompute_force_cpu_on_partial_coverage=true)"
+            )
+        if stages < int(self.kompute_min_native_stage_count):
+            return (
+                "native stage count {stage} below minimum {minimum}".format(
+                    stage=stages,
+                    minimum=int(self.kompute_min_native_stage_count),
+                )
+            )
+        if native_share < float(self.kompute_min_native_stage_share):
+            return (
+                "native stage share {share:.3f} below minimum {minimum:.3f}".format(
+                    share=native_share,
+                    minimum=float(self.kompute_min_native_stage_share),
+                )
+            )
+        if (
+            int(self.kompute_max_unsupported_count) >= 0
+            and unsupported > int(self.kompute_max_unsupported_count)
+        ):
+            return (
+                "unsupported stage count {unsupported} exceeds maximum {maximum}".format(
+                    unsupported=unsupported,
+                    maximum=int(self.kompute_max_unsupported_count),
+                )
+            )
+        if unsupported_share > float(self.kompute_max_unsupported_share):
+            return (
+                "unsupported share {share:.3f} exceeds maximum {maximum:.3f}".format(
+                    share=unsupported_share,
+                    maximum=float(self.kompute_max_unsupported_share),
+                )
+            )
+        return None
 
     def _attempt_kompute_execution(
         self,
@@ -354,16 +505,43 @@ class GFSLExecutor:
                 self._warn_kompute_fallback_once(f"unsupported:{signature}", message)
             return None
 
+        top = sorted(
+            (
+                (str(name), int(count))
+                for name, count in unsupported_by_operation.items()
+            ),
+            key=lambda item: item[1],
+            reverse=True,
+        )[:6]
+        top_text = ", ".join(f"{name}x{count}" for name, count in top) or "none"
+        coverage_reject_reason = self._kompute_coverage_reject_reason(
+            stage_count=stage_count,
+            unsupported_count=unsupported_count,
+        )
+        if coverage_reject_reason:
+            reason = (
+                "coverage-policy={policy}; stages={stage_count}, unsupported={unsupported_count}, top=[{top}]"
+            ).format(
+                policy=coverage_reject_reason,
+                stage_count=stage_count,
+                unsupported_count=unsupported_count,
+                top=top_text,
+            )
+            self._kompute_support_cache[signature] = (False, reason)
+            if forced_backend:
+                message = (
+                    "Kompute execution policy rejected native hybrid path for genome signature "
+                    f"`{signature[:16]}` ({reason}); falling back to CPU execution."
+                )
+                if self.kompute_fail_hard:
+                    raise RuntimeError(message)
+                self._warn_kompute_fallback_once(
+                    f"coverage-policy:{signature}",
+                    message,
+                )
+            return None
+
         if unsupported_count > 0:
-            top = sorted(
-                (
-                    (str(name), int(count))
-                    for name, count in unsupported_by_operation.items()
-                ),
-                key=lambda item: item[1],
-                reverse=True,
-            )[:6]
-            top_text = ", ".join(f"{name}x{count}" for name, count in top) or "none"
             reason = (
                 f"stages={stage_count}, unsupported={unsupported_count}, top=[{top_text}]"
             )

@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
@@ -415,6 +416,7 @@ class GFSLKomputePlanner:
         order: str = "effective",
         keep_vram_state: bool = True,
         native_dispatch_only: bool = False,
+        native_enabled_families: Optional[set[str]] = None,
     ) -> KomputeExecutionPlan:
         if str(order).strip().lower() == "execution":
             indices = list(range(len(genome.instructions)))
@@ -425,6 +427,7 @@ class GFSLKomputePlanner:
             indices=indices,
             keep_vram_state=keep_vram_state,
             native_dispatch_only=native_dispatch_only,
+            native_enabled_families=native_enabled_families,
         )
 
     def compatibility_report(
@@ -434,12 +437,14 @@ class GFSLKomputePlanner:
         order: str = "effective",
         keep_vram_state: bool = True,
         native_dispatch_only: bool = False,
+        native_enabled_families: Optional[set[str]] = None,
     ) -> KomputeCompatibilityReport:
         plan = self.compose(
             genome,
             order=order,
             keep_vram_state=keep_vram_state,
             native_dispatch_only=native_dispatch_only,
+            native_enabled_families=native_enabled_families,
         )
         unsupported_by_operation: Dict[str, int] = {}
         for item in plan.unsupported:
@@ -461,6 +466,7 @@ class GFSLKomputePlanner:
         indices: Iterable[int],
         keep_vram_state: bool = True,
         native_dispatch_only: bool = False,
+        native_enabled_families: Optional[set[str]] = None,
     ) -> KomputeExecutionPlan:
         plan = KomputeExecutionPlan()
         persistent_keys: List[str] = []
@@ -477,6 +483,7 @@ class GFSLKomputePlanner:
                 instruction_index=int(idx),
                 keep_vram_state=bool(keep_vram_state),
                 native_dispatch_only=bool(native_dispatch_only),
+                native_enabled_families=native_enabled_families,
             )
             if isinstance(stage, KomputeUnsupportedInstruction):
                 plan.unsupported.append(stage)
@@ -511,6 +518,7 @@ class GFSLKomputePlanner:
         instruction_index: int,
         keep_vram_state: bool,
         native_dispatch_only: bool,
+        native_enabled_families: Optional[set[str]],
     ) -> Union[KomputeKernelStage, KomputeUnsupportedInstruction]:
         op_code = int(instruction.operation)
         binding = self.registry.ensure_binding_for_opcode(op_code)
@@ -528,7 +536,10 @@ class GFSLKomputePlanner:
                 operation_name=binding.operation_name,
                 reason="Control-flow instructions are not directly composable into data kernels.",
             )
-        if native_dispatch_only and not _is_native_shader_compatible_instruction(instruction):
+        if native_dispatch_only and not _is_native_shader_compatible_instruction(
+            instruction,
+            enabled_families=native_enabled_families,
+        ):
             return KomputeUnsupportedInstruction(
                 instruction_index=instruction_index,
                 operation_code=op_code,
@@ -739,11 +750,17 @@ def _native_is_valid_source_category(
     return False
 
 
-def _is_native_shader_compatible_instruction(instruction: GFSLInstruction) -> bool:
+def _is_native_shader_compatible_instruction(
+    instruction: GFSLInstruction,
+    *,
+    enabled_families: Optional[set[str]] = None,
+) -> bool:
     try:
         op_code = int(instruction.operation)
         family = _native_shader_family(op_code)
         if family is None:
+            return False
+        if enabled_families is not None and family not in enabled_families:
             return False
 
         target_cat = Category(int(instruction.target_cat))
@@ -923,7 +940,13 @@ class _NativeTensorState:
 class _NativeKomputeHybridEngine:
     """Hybrid scalar dispatcher: Vulkan for supported ops, CPU fallback otherwise."""
 
-    def __init__(self, executor: Any, *, keep_vram_state: bool) -> None:
+    def __init__(
+        self,
+        executor: Any,
+        *,
+        keep_vram_state: bool,
+        native_enabled_families: Optional[set[str]] = None,
+    ) -> None:
         import kp  # type: ignore
 
         self.kp = kp
@@ -937,6 +960,9 @@ class _NativeKomputeHybridEngine:
         )
         self.executor = executor
         self.keep_vram_state = bool(keep_vram_state)
+        self.native_enabled_families = (
+            None if native_enabled_families is None else set(native_enabled_families)
+        )
         self.manager = self._create_manager_with_fallback()
         self._compiler_path = self._detect_shader_compiler()
         self._tensor_states: Dict[Tuple[int, int, int], _NativeTensorState] = {}
@@ -944,6 +970,7 @@ class _NativeKomputeHybridEngine:
         self._literal_states: Dict[Tuple[str, str], _NativeTensorState] = {}
         self._algorithms: Dict[Tuple[str, int, int, int], Any] = {}
         self._shader_spirv: Dict[str, bytes] = {}
+        self._pending_sequence: Optional[Any] = None
         self.gpu_dispatch_count = 0
         self.cpu_fallback_count = 0
         self.cpu_full_sync_count = 0
@@ -956,6 +983,71 @@ class _NativeKomputeHybridEngine:
                 "OpTensorSyncDevice/OpTensorSyncLocal) and has no shared memory type "
                 "(MemoryTypes.deviceAndHost/host)."
             )
+
+    def prepare_for_execution(self, *, keep_vram_state: bool) -> None:
+        self.keep_vram_state = bool(keep_vram_state)
+        self.flush_pending_gpu_work()
+        self.gpu_dispatch_count = 0
+        self.cpu_fallback_count = 0
+        self.cpu_full_sync_count = 0
+        self.cpu_partial_sync_count = 0
+        self.cpu_no_sync_count = 0
+        self.cpu_synced_tensors = 0
+
+        if not self.keep_vram_state:
+            self._tensor_states.clear()
+            self._list_length_states.clear()
+            self._literal_states.clear()
+            self._algorithms.clear()
+            return
+
+        self._refresh_cached_scalar_states_from_host()
+        self._refresh_cached_list_states_from_host()
+
+    def _refresh_cached_scalar_states_from_host(self) -> None:
+        for ref, state in self._tensor_states.items():
+            try:
+                host_value = self._read_executor_scalar(ref)
+            except Exception:
+                state.host_dirty = False
+                state.device_dirty = False
+                continue
+            value_float = self._coerce_value_to_float(host_value, dtype=state.dtype)
+            current = float(state.tensor.data()[0])
+            if math.isclose(current, value_float, rel_tol=0.0, abs_tol=1e-12):
+                state.host_dirty = False
+            else:
+                state.tensor.data()[0] = value_float
+                state.host_dirty = True
+            state.device_dirty = False
+
+    def _refresh_cached_list_states_from_host(self) -> None:
+        for ref, state in self._list_length_states.items():
+            try:
+                length_value = float(self._read_executor_list_length(ref))
+            except Exception:
+                state.host_dirty = False
+                state.device_dirty = False
+                continue
+            current = float(state.tensor.data()[0])
+            if math.isclose(current, length_value, rel_tol=0.0, abs_tol=1e-12):
+                state.host_dirty = False
+            else:
+                state.tensor.data()[0] = length_value
+                state.host_dirty = True
+            state.device_dirty = False
+
+    def _acquire_pending_sequence(self) -> Any:
+        if self._pending_sequence is None:
+            self._pending_sequence = self.manager.sequence()
+        return self._pending_sequence
+
+    def flush_pending_gpu_work(self) -> None:
+        sequence = self._pending_sequence
+        if sequence is None:
+            return
+        self._pending_sequence = None
+        sequence.eval()
 
     @staticmethod
     def _detect_shader_compiler() -> Optional[str]:
@@ -1185,7 +1277,10 @@ class _NativeKomputeHybridEngine:
         return _native_is_unary_op(int(op_code))
 
     def can_dispatch(self, instruction: GFSLInstruction) -> bool:
-        return _is_native_shader_compatible_instruction(instruction)
+        return _is_native_shader_compatible_instruction(
+            instruction,
+            enabled_families=self.native_enabled_families,
+        )
 
     @staticmethod
     def _is_valid_source_category(
@@ -1396,7 +1491,12 @@ class _NativeKomputeHybridEngine:
             return None
         return self._ensure_list_length_state(ref)
 
-    def _sync_host_to_device(self, states: List[_NativeTensorState]) -> None:
+    def _sync_host_to_device(
+        self,
+        states: List[_NativeTensorState],
+        *,
+        sequence: Optional[Any] = None,
+    ) -> None:
         pending: List[_NativeTensorState] = []
         seen = set()
         for state in states:
@@ -1410,13 +1510,18 @@ class _NativeKomputeHybridEngine:
         if not pending:
             return
         if self._has_sync_ops:
-            sequence = self.manager.sequence()
-            sequence.record(self._sync_device_op([state.tensor for state in pending]))  # type: ignore[misc]
-            sequence.eval()
+            sync_op = self._sync_device_op([state.tensor for state in pending])  # type: ignore[misc]
+            if sequence is None:
+                sequence = self.manager.sequence()
+                sequence.record(sync_op)
+                sequence.eval()
+            else:
+                sequence.record(sync_op)
         for state in pending:
             state.host_dirty = False
 
     def _sync_device_to_host(self, states: List[_NativeTensorState]) -> int:
+        self.flush_pending_gpu_work()
         pending: List[_NativeTensorState] = []
         seen = set()
         for state in states:
@@ -1546,6 +1651,7 @@ class _NativeKomputeHybridEngine:
         instruction: GFSLInstruction,
         *,
         instruction_index: int,
+        defer_eval: bool = False,
     ) -> bool:
         if not self.can_dispatch(instruction):
             return False
@@ -1573,12 +1679,20 @@ class _NativeKomputeHybridEngine:
         target_ref = self._scalar_ref_from_target(instruction)
         target_state = self._ensure_scalar_state(target_ref)
 
-        self._sync_host_to_device([source1_state, source2_state, target_state])
+        sequence = (
+            self._acquire_pending_sequence()
+            if bool(defer_eval)
+            else self.manager.sequence()
+        )
+        self._sync_host_to_device(
+            [source1_state, source2_state, target_state],
+            sequence=sequence,
+        )
         algorithm = self._shader_algorithm(family, source1_state, source2_state, target_state)
 
-        sequence = self.manager.sequence()
         sequence.record(self.kp.OpAlgoDispatch(algorithm, [float(op_code)]))
-        sequence.eval()
+        if not bool(defer_eval):
+            sequence.eval()
 
         target_state.device_dirty = True
         target_state.host_dirty = False
@@ -1618,6 +1732,13 @@ class _NativeKomputeHybridEngine:
             if source_list_ref is not None:
                 self._refresh_list_length_state(source_list_ref)
 
+
+@dataclass
+class _NativeRuntimeSession:
+    cpu_executor: Any
+    bridge: _NativeKomputeHybridEngine
+
+
 class GFSLKomputeRuntime:
     """Kompute runtime facade with native or simulated execution modes."""
 
@@ -1627,11 +1748,20 @@ class GFSLKomputeRuntime:
         *,
         execution_mode: str = "native",
         allow_auto_simulation_fallback: bool = True,
+        native_enable_decimal: bool = True,
+        native_enable_boolean_compare: bool = True,
+        native_enable_boolean_logic: bool = True,
+        native_enable_list_query: bool = True,
     ) -> None:
         self.planner = planner or GFSLKomputePlanner()
         self.execution_mode = self._normalize_execution_mode(execution_mode)
         self.allow_auto_simulation_fallback = bool(allow_auto_simulation_fallback)
+        self.native_enable_decimal = bool(native_enable_decimal)
+        self.native_enable_boolean_compare = bool(native_enable_boolean_compare)
+        self.native_enable_boolean_logic = bool(native_enable_boolean_logic)
+        self.native_enable_list_query = bool(native_enable_list_query)
         self._last_native_stats: Optional[Dict[str, int]] = None
+        self._native_sessions_local = threading.local()
 
     @staticmethod
     def _normalize_execution_mode(mode: str) -> str:
@@ -1669,6 +1799,52 @@ class GFSLKomputeRuntime:
             return "native"
         return "simulated" if self.allow_auto_simulation_fallback else "native"
 
+    def _native_enabled_families(self) -> set[str]:
+        families: set[str] = set()
+        if self.native_enable_decimal:
+            families.add("decimal")
+        if self.native_enable_boolean_compare:
+            families.add("boolean.compare")
+        if self.native_enable_boolean_logic:
+            families.add("boolean.logic")
+        if self.native_enable_list_query:
+            families.add("list.query")
+        return families
+
+    def _native_session_store(self) -> Dict[Tuple[str, ...], _NativeRuntimeSession]:
+        store = getattr(self._native_sessions_local, "sessions", None)
+        if isinstance(store, dict):
+            return store
+        created: Dict[Tuple[str, ...], _NativeRuntimeSession] = {}
+        self._native_sessions_local.sessions = created
+        return created
+
+    def _native_session_key(self) -> Tuple[str, ...]:
+        families = self._native_enabled_families()
+        return tuple(sorted(str(family) for family in families))
+
+    def _get_native_runtime_session(self) -> _NativeRuntimeSession:
+        session_key = self._native_session_key()
+        store = self._native_session_store()
+        cached = store.get(session_key)
+        if cached is not None:
+            return cached
+
+        from .executor import GFSLExecutor
+
+        cpu_executor = GFSLExecutor(compute_backend="cpu")
+        bridge = _NativeKomputeHybridEngine(
+            cpu_executor,
+            keep_vram_state=True,
+            native_enabled_families=set(session_key),
+        )
+        session = _NativeRuntimeSession(
+            cpu_executor=cpu_executor,
+            bridge=bridge,
+        )
+        store[session_key] = session
+        return session
+
     def compose(
         self,
         genome: GFSLGenome,
@@ -1677,6 +1853,7 @@ class GFSLKomputeRuntime:
         keep_vram_state: bool = True,
         native_dispatch_only: Optional[bool] = None,
     ) -> KomputeExecutionPlan:
+        native_families = self._native_enabled_families()
         native_only = (
             bool(native_dispatch_only)
             if native_dispatch_only is not None
@@ -1687,6 +1864,7 @@ class GFSLKomputeRuntime:
             order=order,
             keep_vram_state=keep_vram_state,
             native_dispatch_only=native_only,
+            native_enabled_families=native_families,
         )
 
     def compatibility_report(
@@ -1697,6 +1875,7 @@ class GFSLKomputeRuntime:
         keep_vram_state: bool = True,
         native_dispatch_only: Optional[bool] = None,
     ) -> KomputeCompatibilityReport:
+        native_families = self._native_enabled_families()
         native_only = (
             bool(native_dispatch_only)
             if native_dispatch_only is not None
@@ -1707,6 +1886,7 @@ class GFSLKomputeRuntime:
             order=order,
             keep_vram_state=keep_vram_state,
             native_dispatch_only=native_only,
+            native_enabled_families=native_families,
         )
 
     def compile(
@@ -1799,18 +1979,15 @@ class GFSLKomputeRuntime:
                 "Kompute bindings are not installed (`kp` import failed)."
             )
 
-        from .executor import GFSLExecutor
-
-        cpu_executor = GFSLExecutor(compute_backend="cpu")
+        session = self._get_native_runtime_session()
+        cpu_executor = session.cpu_executor
+        bridge = session.bridge
         self._seed_inputs(cpu_executor, inputs)
         cpu_executor._index_functions(genome)
+        bridge.prepare_for_execution(keep_vram_state=keep_vram_state)
         selected_indices = self._selected_indices(genome, order=order)
         stage_indices = {int(stage.instruction_index) for stage in plan.stages}
 
-        bridge = _NativeKomputeHybridEngine(
-            cpu_executor,
-            keep_vram_state=keep_vram_state,
-        )
         for idx in cpu_executor._main_execution_indices(selected_indices):
             if idx < 0 or idx >= len(genome.instructions):
                 continue
@@ -1821,11 +1998,13 @@ class GFSLKomputeRuntime:
                     ran_on_gpu = bridge.dispatch_instruction(
                         instruction,
                         instruction_index=int(idx),
+                        defer_eval=True,
                     )
                 except Exception:
                     ran_on_gpu = False
             if ran_on_gpu:
                 continue
+            bridge.flush_pending_gpu_work()
             sync_mode, synced_tensors = bridge.sync_for_cpu_instruction(instruction)
             bridge.record_cpu_fallback(
                 sync_mode=sync_mode,
@@ -1838,6 +2017,7 @@ class GFSLKomputeRuntime:
             )
             bridge.absorb_cpu_target_update(instruction)
 
+        bridge.flush_pending_gpu_work()
         final_sync_count = bridge.sync_all_device_to_host()
         self._last_native_stats = {
             "gpu_dispatch_count": int(bridge.gpu_dispatch_count),
