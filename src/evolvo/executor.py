@@ -167,6 +167,7 @@ class GFSLExecutor:
         self._kompute_warned_keys: Set[str] = set()
         self._kompute_support_cache: Dict[str, Tuple[bool, str]] = {}
         self._kompute_warning_bucket_limit = 24
+        self._last_execution_stats: Dict[str, Any] = self._empty_execution_stats()
         self.reset()
 
     @staticmethod
@@ -231,6 +232,26 @@ class GFSLExecutor:
         except (TypeError, ValueError, OverflowError):
             return 0.0
 
+    @staticmethod
+    def _empty_execution_stats() -> Dict[str, Any]:
+        return {
+            "backend": "cpu",
+            "used_kompute": False,
+            "gpu_dispatch_count": 0,
+            "cpu_fallback_count": 0,
+            "cpu_full_sync_count": 0,
+            "cpu_partial_sync_count": 0,
+            "cpu_no_sync_count": 0,
+            "cpu_synced_tensors": 0,
+            "final_sync_count": 0,
+        }
+
+    def last_execution_stats(self) -> Dict[str, Any]:
+        stats = getattr(self, "_last_execution_stats", None)
+        if isinstance(stats, dict):
+            return dict(stats)
+        return self._empty_execution_stats()
+
     def execute(
         self,
         genome: GFSLGenome,
@@ -248,6 +269,7 @@ class GFSLExecutor:
             track_activity: Override activity tracking for this run.
             activity_tick: Optional explicit activity tick to record on the genome.
         """
+        self._last_execution_stats = self._empty_execution_stats()
         kompute_outputs = self._attempt_kompute_execution(
             genome,
             inputs=inputs,
@@ -602,16 +624,35 @@ class GFSLExecutor:
                 activity_tick=activity_tick,
                 keep_vram_state=bool(self.kompute_keep_vram_state),
             )
+            resolved_mode = "unknown"
+            resolve_mode = getattr(runtime, "_resolve_execute_mode", None)
+            if callable(resolve_mode):
+                try:
+                    resolved_mode = str(resolve_mode()).strip().lower() or "unknown"
+                except Exception:
+                    resolved_mode = "unknown"
             stats = getattr(runtime, "_last_native_stats", None)
+            stats_dict: Dict[str, Any] = dict(stats) if isinstance(stats, dict) else {}
+            gpu_dispatch = int(stats_dict.get("gpu_dispatch_count", 0))
+            cpu_fallback = int(stats_dict.get("cpu_fallback_count", 0))
+            full_sync = int(stats_dict.get("cpu_full_sync_count", 0))
+            partial_sync = int(stats_dict.get("cpu_partial_sync_count", 0))
+            no_sync = int(stats_dict.get("cpu_no_sync_count", 0))
+            synced = int(stats_dict.get("cpu_synced_tensors", 0))
+            final_sync = int(stats_dict.get("final_sync_count", 0))
+            self._last_execution_stats = {
+                "backend": f"kompute:{resolved_mode}",
+                "used_kompute": True,
+                "gpu_dispatch_count": max(0, gpu_dispatch),
+                "cpu_fallback_count": max(0, cpu_fallback),
+                "cpu_full_sync_count": max(0, full_sync),
+                "cpu_partial_sync_count": max(0, partial_sync),
+                "cpu_no_sync_count": max(0, no_sync),
+                "cpu_synced_tensors": max(0, synced),
+                "final_sync_count": max(0, final_sync),
+            }
             if forced_backend and isinstance(stats, dict):
-                gpu_dispatch = int(stats.get("gpu_dispatch_count", 0))
-                cpu_fallback = int(stats.get("cpu_fallback_count", 0))
                 if cpu_fallback > 0:
-                    full_sync = int(stats.get("cpu_full_sync_count", 0))
-                    partial_sync = int(stats.get("cpu_partial_sync_count", 0))
-                    no_sync = int(stats.get("cpu_no_sync_count", 0))
-                    synced = int(stats.get("cpu_synced_tensors", 0))
-                    final_sync = int(stats.get("final_sync_count", 0))
                     message = (
                         "Kompute hybrid runtime summary for genome signature "
                         f"`{signature[:16]}`: gpu_dispatch={gpu_dispatch}, "
