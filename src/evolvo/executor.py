@@ -494,11 +494,20 @@ class GFSLExecutor:
             return None
 
         if not runtime.is_available():
+            unavailable_reason = ""
+            get_unavailable_reason = getattr(runtime, "native_unavailable_reason", None)
+            if callable(get_unavailable_reason):
+                try:
+                    unavailable_reason = str(get_unavailable_reason()).strip()
+                except Exception:
+                    unavailable_reason = ""
+            if backend == "auto" and unavailable_reason:
+                _GLOBAL_AUTO_KOMPUTE_DISABLE_REASON = unavailable_reason
             if forced_backend:
-                message = (
-                    "GFSLExecutor requested `kompute` backend but `kp` is not installed "
-                    "or not usable; falling back to CPU execution."
-                )
+                message = "GFSLExecutor requested `kompute` backend but `kp` is not installed or not usable"
+                if unavailable_reason:
+                    message = f"{message} ({unavailable_reason})"
+                message = f"{message}; falling back to CPU execution."
                 if self.kompute_fail_hard:
                     raise ModuleNotFoundError(message)
                 self._warn_kompute_fallback_once("kp-unavailable", message)

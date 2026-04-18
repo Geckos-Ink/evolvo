@@ -10,8 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 import os
+import signal
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
@@ -1902,6 +1904,9 @@ class _NativeRuntimeSession:
 class GFSLKomputeRuntime:
     """Kompute runtime facade with native or simulated execution modes."""
 
+    _NATIVE_READINESS_CACHE: Dict[Tuple[str, ...], Tuple[bool, str]] = {}
+    _NATIVE_READINESS_LOCK = threading.Lock()
+
     def __init__(
         self,
         planner: Optional[GFSLKomputePlanner] = None,
@@ -1939,23 +1944,245 @@ class GFSLKomputeRuntime:
         except Exception:
             return False
 
+    @staticmethod
+    def _env_truthy(name: str) -> bool:
+        raw = os.environ.get(name)
+        if raw is None:
+            return False
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    @classmethod
+    def _native_probe_cache_key(cls) -> Tuple[str, ...]:
+        return (
+            str(sys.executable),
+            str(os.environ.get("EVOLVO_KOMPUTE_DEVICE_INDEX", "")).strip(),
+            str(os.environ.get("EVOLVO_KOMPUTE_QUEUE_FAMILY", "")).strip(),
+            str(os.environ.get("VK_ICD_FILENAMES", "")).strip(),
+            str(os.environ.get("VK_LAYER_PATH", "")).strip(),
+            str(os.environ.get("LD_LIBRARY_PATH", "")).strip(),
+        )
+
+    @staticmethod
+    def _native_probe_timeout_seconds() -> float:
+        raw = str(os.environ.get("EVOLVO_KOMPUTE_NATIVE_PROBE_TIMEOUT", "")).strip()
+        if not raw:
+            return 12.0
+        try:
+            value = float(raw)
+        except Exception:
+            return 12.0
+        if not math.isfinite(value):
+            return 12.0
+        return max(1.0, min(60.0, float(value)))
+
+    @staticmethod
+    def _truncate_probe_output(text: str, *, max_lines: int = 8) -> str:
+        lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+        if not lines:
+            return ""
+        if len(lines) <= int(max_lines):
+            return " | ".join(lines)
+        head = lines[: int(max_lines)]
+        return " | ".join(head + [f"... (+{len(lines) - int(max_lines)} more lines)"])
+
+    @staticmethod
+    def _signal_name(signum: int) -> str:
+        try:
+            return str(signal.Signals(int(signum)).name)
+        except Exception:
+            return f"SIG{int(signum)}"
+
+    @staticmethod
+    def _native_probe_script() -> str:
+        return """
+import os
+import sys
+import numpy as np
+
+def _env_int(name):
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except Exception:
+        return None
+
+def _candidate_device_indices():
+    configured = _env_int("EVOLVO_KOMPUTE_DEVICE_INDEX")
+    if configured is not None:
+        return [max(0, int(configured))]
+    return [0, 1, 2, 3]
+
+def _candidate_queue_families():
+    configured = _env_int("EVOLVO_KOMPUTE_QUEUE_FAMILY")
+    if configured is not None:
+        return [max(0, int(configured))]
+    return [None, 0]
+
+def _sync_ops(kp_module):
+    sync_device = getattr(kp_module, "OpSyncDevice", None)
+    sync_local = getattr(kp_module, "OpSyncLocal", None)
+    if sync_device is None:
+        sync_device = getattr(kp_module, "OpTensorSyncDevice", None)
+    if sync_local is None:
+        sync_local = getattr(kp_module, "OpTensorSyncLocal", None)
+    return sync_device, sync_local
+
+def _shared_memory_type(kp_module):
+    memory_types = getattr(kp_module, "MemoryTypes", None)
+    if memory_types is not None and hasattr(memory_types, "deviceAndHost"):
+        return memory_types.deviceAndHost
+    if memory_types is not None and hasattr(memory_types, "host"):
+        return memory_types.host
+    if hasattr(kp_module, "deviceAndHost"):
+        return getattr(kp_module, "deviceAndHost")
+    if hasattr(kp_module, "host"):
+        return getattr(kp_module, "host")
+    return None
+
+try:
+    import kp  # type: ignore
+except Exception as exc:
+    print("kp import failed: {err}".format(err=str(exc)), file=sys.stderr)
+    sys.exit(4)
+
+errors = []
+for device_index in _candidate_device_indices():
+    for queue_family in _candidate_queue_families():
+        queue_label = "default" if queue_family is None else str(int(queue_family))
+        try:
+            if queue_family is None:
+                manager = kp.Manager(int(device_index))
+            else:
+                manager = kp.Manager(
+                    device=int(device_index),
+                    family_queue_indices=[int(queue_family)],
+                    desired_extensions=[],
+                )
+            sync_device, sync_local = _sync_ops(kp)
+            if sync_device is not None and sync_local is not None:
+                tensor = manager.tensor(np.array([1.0], dtype=np.float32))
+                sequence = manager.sequence()
+                sequence.record(sync_device([tensor]))
+                sequence.record(sync_local([tensor]))
+                sequence.eval()
+                _ = float(tensor.data()[0])
+            else:
+                shared_memory = _shared_memory_type(kp)
+                if shared_memory is not None:
+                    tensor = manager.tensor(
+                        np.array([1.0], dtype=np.float32),
+                        shared_memory,
+                    )
+                    _ = float(tensor.data()[0])
+            sys.exit(0)
+        except Exception as exc:
+            errors.append(
+                "device={device} queue_family={queue} -> {err}".format(
+                    device=int(device_index),
+                    queue=queue_label,
+                    err=str(exc),
+                )
+            )
+
+print("; ".join(errors[-4:]) if errors else "no-manager-attempts", file=sys.stderr)
+sys.exit(3)
+""".strip()
+
+    @classmethod
+    def _run_native_readiness_probe(cls) -> Tuple[bool, str]:
+        timeout_seconds = cls._native_probe_timeout_seconds()
+        cmd = [str(sys.executable), "-c", cls._native_probe_script()]
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
+            return (
+                False,
+                "native Vulkan probe timed out "
+                f"(>{timeout_seconds:.1f}s) while initializing Kompute manager.",
+            )
+        except Exception as exc:
+            return False, f"native Vulkan probe failed to start ({exc})"
+
+        if int(proc.returncode) == 0:
+            return True, "native Vulkan probe passed"
+
+        stderr_text = cls._truncate_probe_output(proc.stderr)
+        stdout_text = cls._truncate_probe_output(proc.stdout)
+        detail = stderr_text or stdout_text or "no detail"
+        return_code = int(proc.returncode)
+        if return_code < 0:
+            signame = cls._signal_name(-return_code)
+            return (
+                False,
+                "native Vulkan probe crashed with signal "
+                f"{signame}; detail: {detail}",
+            )
+        return (
+            False,
+            "native Vulkan probe failed with return code "
+            f"{return_code}; detail: {detail}",
+        )
+
+    @classmethod
+    def _native_runtime_readiness(cls) -> Tuple[bool, str]:
+        if not cls._has_kp_bindings():
+            return False, "kp import failed"
+        if cls._env_truthy("EVOLVO_KOMPUTE_SKIP_NATIVE_PROBE"):
+            return True, "native Vulkan probe skipped via EVOLVO_KOMPUTE_SKIP_NATIVE_PROBE"
+
+        cache_key = cls._native_probe_cache_key()
+        with cls._NATIVE_READINESS_LOCK:
+            cached = cls._NATIVE_READINESS_CACHE.get(cache_key)
+        if cached is not None:
+            return bool(cached[0]), str(cached[1])
+
+        probed = cls._run_native_readiness_probe()
+        with cls._NATIVE_READINESS_LOCK:
+            cls._NATIVE_READINESS_CACHE[cache_key] = (
+                bool(probed[0]),
+                str(probed[1]),
+            )
+        return bool(probed[0]), str(probed[1])
+
+    def native_unavailable_reason(self) -> str:
+        mode = self._normalize_execution_mode(self.execution_mode)
+        if mode == "simulated":
+            return ""
+        ready, reason = self._native_runtime_readiness()
+        if ready:
+            return ""
+        return str(reason)
+
     def is_available(self) -> bool:
         mode = self._normalize_execution_mode(self.execution_mode)
         if mode == "simulated":
             return True
+        native_ready, _reason = self._native_runtime_readiness()
         if mode == "native":
-            return self._has_kp_bindings()
+            return bool(native_ready)
         # auto
-        return bool(self._has_kp_bindings() or self.allow_auto_simulation_fallback)
+        return bool(native_ready or self.allow_auto_simulation_fallback)
 
     def _resolve_execute_mode(self) -> str:
         mode = self._normalize_execution_mode(self.execution_mode)
         if mode == "simulated":
             return "simulated"
+        native_ready, _reason = self._native_runtime_readiness()
         if mode == "native":
             return "native"
         # auto
-        if self._has_kp_bindings():
+        if native_ready:
             return "native"
         return "simulated" if self.allow_auto_simulation_fallback else "native"
 
@@ -2069,6 +2296,13 @@ class GFSLKomputeRuntime:
                 "Kompute bindings are not installed (`kp` import failed). "
                 "Plan composition is available, but native runtime compilation is unavailable."
             )
+        if mode == "native":
+            native_ready, native_reason = self._native_runtime_readiness()
+            if not native_ready:
+                raise RuntimeError(
+                    "Kompute native runtime is not safely available: "
+                    f"{native_reason}"
+                )
         return {
             "status": "planned",
             "plan": plan.to_dict(),
@@ -2138,6 +2372,12 @@ class GFSLKomputeRuntime:
         if not self._has_kp_bindings():
             raise ModuleNotFoundError(
                 "Kompute bindings are not installed (`kp` import failed)."
+            )
+        native_ready, native_reason = self._native_runtime_readiness()
+        if not native_ready:
+            raise RuntimeError(
+                "Kompute native runtime is not safely available: "
+                f"{native_reason}"
             )
 
         session = self._get_native_runtime_session()
