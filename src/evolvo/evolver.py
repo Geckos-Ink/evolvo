@@ -9,6 +9,7 @@ from typing import Callable, List, Optional, Sequence, Set, TYPE_CHECKING
 
 from .genome import GFSLGenome
 from .instruction import GFSLInstruction
+from .slots import SLOT_OPERATION
 
 if TYPE_CHECKING:
     from .supervised import GFSLSupervisedGuide
@@ -34,6 +35,34 @@ def _invalidate_genome_caches(genome: GFSLGenome) -> None:
         delattr(genome, "_evolvo_eval_sig_key")
 
 
+def _weighted_slot_choice(
+    genome: GFSLGenome,
+    *,
+    slot_idx: int,
+    options: Sequence[int],
+) -> int:
+    if not options:
+        raise ValueError("No options available for weighted slot choice.")
+    if int(slot_idx) != int(SLOT_OPERATION):
+        return int(random.choice(list(options)))
+    weighted: List[float] = []
+    total = 0.0
+    operation_weights = getattr(genome, "operation_weights", None)
+    for opt in options:
+        if operation_weights is None:
+            resolved = 1.0
+        else:
+            resolved = operation_weights.resolve_weight(int(opt), default=1.0)
+        weight = 1.0 if resolved is None else float(resolved)
+        if weight < 0.0 or weight == float("inf") or weight != weight:
+            weight = 0.0
+        weighted.append(weight)
+        total += weight
+    if total <= 0.0:
+        return int(random.choice(list(options)))
+    return int(random.choices(list(options), weights=weighted, k=1)[0])
+
+
 def _append_random_instruction_fast(
     genome: GFSLGenome,
     *,
@@ -49,7 +78,11 @@ def _append_random_instruction_fast(
             if not options:
                 valid = False
                 break
-            instruction.slots[slot_idx] = random.choice(options)
+            instruction.slots[slot_idx] = _weighted_slot_choice(
+                genome,
+                slot_idx=int(slot_idx),
+                options=options,
+            )
         if not valid:
             continue
 
@@ -307,7 +340,11 @@ class GFSLEvolver:
             current_val = candidate.slots[slot_idx]
             alternatives = [opt for opt in valid_options if opt != current_val]
             if alternatives:
-                candidate.slots[slot_idx] = random.choice(alternatives)
+                candidate.slots[slot_idx] = _weighted_slot_choice(
+                    genome,
+                    slot_idx=int(slot_idx),
+                    options=alternatives,
+                )
                 changed = True
             else:
                 changed = False
@@ -322,13 +359,21 @@ class GFSLEvolver:
                     break
                 next_current = candidate.slots[next_slot]
                 if next_current not in next_valid:
-                    candidate.slots[next_slot] = random.choice(next_valid)
+                    candidate.slots[next_slot] = _weighted_slot_choice(
+                        genome,
+                        slot_idx=int(next_slot),
+                        options=next_valid,
+                    )
                     changed = True
                     continue
                 if random.random() < diversification and len(next_valid) > 1:
                     next_alternatives = [opt for opt in next_valid if opt != next_current]
                     if next_alternatives:
-                        candidate.slots[next_slot] = random.choice(next_alternatives)
+                        candidate.slots[next_slot] = _weighted_slot_choice(
+                            genome,
+                            slot_idx=int(next_slot),
+                            options=next_alternatives,
+                        )
                         changed = True
 
             if not valid_suffix or not changed:

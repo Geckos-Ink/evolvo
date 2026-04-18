@@ -715,6 +715,7 @@ _BOOLEAN_COMPARE_OP_CODES = {int(op) for op in BOOLEAN_COMPARE_OPS}
 _BOOLEAN_LOGIC_OP_CODES = {int(op) for op in BOOLEAN_LOGIC_OPS}
 _BOOLEAN_UNARY_OP_CODES = {int(Operation.NOT)}
 _LIST_QUERY_OP_CODES = {int(Operation.LISTCOUNT), int(Operation.LISTHASITEMS)}
+_PCPL_GPU_CUSTOM_OP_NAMES = {"PCPL_HASHMIX", "PCPL_PHASEMIX", "PCPL_MODHASH"}
 
 
 def _native_shader_family(op_code: int) -> Optional[str]:
@@ -727,6 +728,18 @@ def _native_shader_family(op_code: int) -> Optional[str]:
         return "boolean.logic"
     if code in _LIST_QUERY_OP_CODES:
         return "list.query"
+    custom_op = custom_operations.get(code)
+    if custom_op is None:
+        return None
+    name = str(custom_op.name).strip().upper()
+    if (
+        name in _PCPL_GPU_CUSTOM_OP_NAMES
+        and int(custom_op.arity) == 2
+        and int(custom_op.target_type) == int(DataType.DECIMAL)
+        and int(custom_op.source_types[0] or DataType.DECIMAL) == int(DataType.DECIMAL)
+        and int(custom_op.source_types[1] or DataType.DECIMAL) == int(DataType.DECIMAL)
+    ):
+        return "pcpl.hash"
     return None
 
 
@@ -767,7 +780,7 @@ def _is_native_shader_compatible_instruction(
         if target_cat not in _SCALAR_POINTER_CATEGORIES:
             return False
         target_dtype = DataType(int(instruction.target_type))
-        if family == "decimal" and target_dtype != DataType.DECIMAL:
+        if family in {"decimal", "pcpl.hash"} and target_dtype != DataType.DECIMAL:
             return False
         if family in {"boolean.compare", "boolean.logic"} and target_dtype != DataType.BOOLEAN:
             return False
@@ -923,6 +936,98 @@ void main() {
 }
 """
 
+_PCPL_HASH_SHADER_SOURCE = """#version 450
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(binding = 0) buffer Src1Buffer { float src1[]; };
+layout(binding = 1) buffer Src2Buffer { float src2[]; };
+layout(binding = 2) buffer DstBuffer  { float dst[]; };
+layout(push_constant) uniform PushConstants { float op_code; } push_consts;
+
+const float QUANT_CLAMP = 1000000.0;
+const float QUANT_SCALE = 1000000.0;
+const float U32_MOD = 4294967296.0;
+
+uint quantize_u32(float value) {
+    float clipped = clamp(value, -QUANT_CLAMP, QUANT_CLAMP);
+    float scaled = floor(abs(clipped) * QUANT_SCALE + 0.5);
+    float wrapped = mod(scaled, U32_MOD);
+    uint raw = uint(wrapped);
+    return (clipped < 0.0) ? (0u - raw) : raw;
+}
+
+float quantize_abs_scaled(float value) {
+    float clipped = clamp(value, -QUANT_CLAMP, QUANT_CLAMP);
+    return floor(abs(clipped) * QUANT_SCALE + 0.5);
+}
+
+uint mix_u32(uint value) {
+    uint mixed = value;
+    mixed ^= (mixed >> 16);
+    mixed *= 0x7FEB352Du;
+    mixed ^= (mixed >> 15);
+    mixed *= 0x846CA68Bu;
+    mixed ^= (mixed >> 16);
+    return mixed;
+}
+
+uint mul_mod_u32(uint a, uint b, uint modv) {
+    if (modv == 0u) {
+        return 0u;
+    }
+    uint result = 0u;
+    uint x = a % modv;
+    uint y = b % modv;
+    while (y > 0u) {
+        if ((y & 1u) != 0u) {
+            result = (result + x) % modv;
+        }
+        x = (x * 2u) % modv;
+        y >>= 1;
+    }
+    return result;
+}
+
+uint pow3_mod_u32(uint basev, uint modv) {
+    uint sq = mul_mod_u32(basev, basev, modv);
+    return mul_mod_u32(sq, basev, modv);
+}
+
+float unit_from_u32(uint value) {
+    return float(value) / 4294967295.0;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    float a = src1[i];
+    float b = src2[i];
+    int op = int(push_consts.op_code + 0.5);
+    uint qa = quantize_u32(a);
+    uint qb = quantize_u32(b);
+    uint seed = 0u;
+
+    // op variants: 0=PCPL_HASHMIX, 1=PCPL_PHASEMIX, 2=PCPL_MODHASH
+    if (op == 0) {
+        seed = qa ^ (qb * 0x9E3779B1u);
+        seed ^= 0xA5A5A5A5u;
+    } else if (op == 1) {
+        uint folded = (qa * 31u) ^ (qb * 17u);
+        seed = folded ^ (qa - qb) ^ 0xC3A5C85Cu;
+    } else if (op == 2) {
+        float qa_abs_scaled = quantize_abs_scaled(a);
+        float qb_abs_scaled = quantize_abs_scaled(b);
+        uint modv = uint(mod(qb_abs_scaled, 1000003.0) + 97.0);
+        uint basev = uint(mod(qa_abs_scaled + 1.0, float(modv)));
+        uint mixed = pow3_mod_u32(basev, modv);
+        seed = mixed ^ (modv * 0x27D4EB2Du) ^ 0x85EBCA6Bu;
+    } else {
+        seed = qa ^ qb;
+    }
+
+    float out_value = (2.0 * unit_from_u32(mix_u32(seed))) - 1.0;
+    dst[i] = out_value;
+}
+"""
+
 _GLOBAL_SPIRV_SHADER_CACHE: Dict[str, bytes] = {}
 
 
@@ -965,12 +1070,14 @@ class _NativeKomputeHybridEngine:
         )
         self.manager = self._create_manager_with_fallback()
         self._compiler_path = self._detect_shader_compiler()
+        self._dispatch_batch_limit = self._dispatch_batch_limit_from_env()
         self._tensor_states: Dict[Tuple[int, int, int], _NativeTensorState] = {}
         self._list_length_states: Dict[Tuple[int, int, int], _NativeTensorState] = {}
         self._literal_states: Dict[Tuple[str, str], _NativeTensorState] = {}
         self._algorithms: Dict[Tuple[str, int, int, int], Any] = {}
         self._shader_spirv: Dict[str, bytes] = {}
         self._pending_sequence: Optional[Any] = None
+        self._pending_dispatch_count = 0
         self.gpu_dispatch_count = 0
         self.cpu_fallback_count = 0
         self.cpu_full_sync_count = 0
@@ -987,6 +1094,7 @@ class _NativeKomputeHybridEngine:
     def prepare_for_execution(self, *, keep_vram_state: bool) -> None:
         self.keep_vram_state = bool(keep_vram_state)
         self.flush_pending_gpu_work()
+        self._pending_dispatch_count = 0
         self.gpu_dispatch_count = 0
         self.cpu_fallback_count = 0
         self.cpu_full_sync_count = 0
@@ -1045,9 +1153,11 @@ class _NativeKomputeHybridEngine:
     def flush_pending_gpu_work(self) -> None:
         sequence = self._pending_sequence
         if sequence is None:
+            self._pending_dispatch_count = 0
             return
         self._pending_sequence = None
         sequence.eval()
+        self._pending_dispatch_count = 0
 
     @staticmethod
     def _detect_shader_compiler() -> Optional[str]:
@@ -1061,6 +1171,16 @@ class _NativeKomputeHybridEngine:
             if resolved:
                 return resolved
         return None
+
+    @staticmethod
+    def _dispatch_batch_limit_from_env() -> int:
+        raw = str(os.environ.get("EVOLVO_KOMPUTE_DISPATCH_BATCH_LIMIT", "")).strip()
+        if not raw:
+            return 48
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return 48
 
     @staticmethod
     def _shared_memory_type_for_kp(kp_module: Any) -> Optional[Any]:
@@ -1252,6 +1372,8 @@ class _NativeKomputeHybridEngine:
             return _BOOLEAN_LOGIC_SHADER_SOURCE
         if family == "list.query":
             return _LIST_QUERY_SHADER_SOURCE
+        if family == "pcpl.hash":
+            return _PCPL_HASH_SHADER_SOURCE
         raise ValueError(f"Unsupported shader family `{family}`.")
 
     def _shader_spirv_bytes(self, family: str) -> bytes:
@@ -1593,12 +1715,27 @@ class _NativeKomputeHybridEngine:
             refs.append(source2_ref)
         return refs
 
+    def _cpu_target_scalar_ref(
+        self,
+        instruction: GFSLInstruction,
+    ) -> Optional[Tuple[int, int, int]]:
+        target_ref = self._scalar_ref_from_target(instruction)
+        if target_ref is None:
+            return None
+        category = Category(int(target_ref[0]))
+        if category not in _SCALAR_POINTER_CATEGORIES:
+            return None
+        return target_ref
+
     def sync_for_cpu_instruction(self, instruction: GFSLInstruction) -> Tuple[str, int]:
         if self._requires_full_cpu_sync(instruction):
             synced = self.sync_all_device_to_host()
             return ("full", int(synced))
 
         refs = self._cpu_source_scalar_refs(instruction)
+        target_ref = self._cpu_target_scalar_ref(instruction)
+        if target_ref is not None:
+            refs.append(target_ref)
         if not refs:
             return ("none", 0)
         synced = self._sync_refs_device_to_host(refs)
@@ -1646,6 +1783,18 @@ class _NativeKomputeHybridEngine:
         value = self._read_executor_scalar(ref)
         return bool(self.executor._is_void(value))
 
+    @staticmethod
+    def _pcpl_shader_variant(op_code: int) -> int:
+        custom_op = custom_operations.get(int(op_code))
+        name = str(getattr(custom_op, "name", "")).strip().upper()
+        if name == "PCPL_HASHMIX":
+            return 0
+        if name == "PCPL_PHASEMIX":
+            return 1
+        if name == "PCPL_MODHASH":
+            return 2
+        return -1
+
     def dispatch_instruction(
         self,
         instruction: GFSLInstruction,
@@ -1667,6 +1816,12 @@ class _NativeKomputeHybridEngine:
         family = self._op_shader_family(op_code)
         if family is None:
             return False
+        shader_op_code = int(op_code)
+        if family == "pcpl.hash":
+            variant = self._pcpl_shader_variant(op_code)
+            if variant < 0:
+                return False
+            shader_op_code = int(variant)
 
         if family == "list.query":
             source1_state = self._list_source_state(instruction, 1)
@@ -1690,9 +1845,14 @@ class _NativeKomputeHybridEngine:
         )
         algorithm = self._shader_algorithm(family, source1_state, source2_state, target_state)
 
-        sequence.record(self.kp.OpAlgoDispatch(algorithm, [float(op_code)]))
+        sequence.record(self.kp.OpAlgoDispatch(algorithm, [float(shader_op_code)]))
         if not bool(defer_eval):
             sequence.eval()
+            self._pending_dispatch_count = 0
+        else:
+            self._pending_dispatch_count += 1
+            if self._pending_dispatch_count >= int(self._dispatch_batch_limit):
+                self.flush_pending_gpu_work()
 
         target_state.device_dirty = True
         target_state.host_dirty = False
@@ -1803,6 +1963,7 @@ class GFSLKomputeRuntime:
         families: set[str] = set()
         if self.native_enable_decimal:
             families.add("decimal")
+            families.add("pcpl.hash")
         if self.native_enable_boolean_compare:
             families.add("boolean.compare")
         if self.native_enable_boolean_logic:
@@ -2004,7 +2165,6 @@ class GFSLKomputeRuntime:
                     ran_on_gpu = False
             if ran_on_gpu:
                 continue
-            bridge.flush_pending_gpu_work()
             sync_mode, synced_tensors = bridge.sync_for_cpu_instruction(instruction)
             bridge.record_cpu_fallback(
                 sync_mode=sync_mode,
