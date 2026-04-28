@@ -7,15 +7,20 @@ plan can be produced even on systems where Kompute is not installed.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
+import hashlib
+import json
 import math
 import os
+from pathlib import Path
 import signal
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
@@ -35,6 +40,13 @@ from .enums import (
 )
 from .genome import GFSLGenome
 from .instruction import GFSLInstruction
+from .settings import (
+    DEFAULT_KOMPUTE_PLAN_CACHE_ENABLE,
+    DEFAULT_KOMPUTE_PLAN_CACHE_MAX_ENTRIES,
+    DEFAULT_KOMPUTE_PLAN_DISK_CACHE_DIR,
+    DEFAULT_KOMPUTE_PLAN_DISK_CACHE_ENABLE,
+    DEFAULT_KOMPUTE_PLAN_DISK_CACHE_MAX_FILES,
+)
 from .values import ValueEnumerations
 
 
@@ -1895,6 +1907,73 @@ class _NativeKomputeHybridEngine:
                 self._refresh_list_length_state(source_list_ref)
 
 
+@dataclass(frozen=True)
+class _ExecutionPlanProfile:
+    """Cached execution profile used by compatibility checks and runtime dispatch."""
+
+    stage_indices: Tuple[int, ...]
+    stage_count: int
+    unsupported_count: int
+    unsupported_by_operation: Dict[str, int]
+    notes: Tuple[str, ...]
+
+    @classmethod
+    def from_plan(cls, plan: KomputeExecutionPlan) -> "_ExecutionPlanProfile":
+        unsupported_by_operation: Dict[str, int] = {}
+        for item in plan.unsupported:
+            key = str(item.operation_name)
+            unsupported_by_operation[key] = int(unsupported_by_operation.get(key, 0) + 1)
+        stage_indices = tuple(
+            sorted(int(stage.instruction_index) for stage in plan.stages)
+        )
+        return cls(
+            stage_indices=stage_indices,
+            stage_count=int(len(plan.stages)),
+            unsupported_count=int(len(plan.unsupported)),
+            unsupported_by_operation=unsupported_by_operation,
+            notes=tuple(str(note) for note in plan.notes),
+        )
+
+    def to_cache_payload(self) -> Dict[str, Any]:
+        return {
+            "stage_indices": [int(idx) for idx in self.stage_indices],
+            "stage_count": int(self.stage_count),
+            "unsupported_count": int(self.unsupported_count),
+            "unsupported_by_operation": {
+                str(name): int(count)
+                for name, count in self.unsupported_by_operation.items()
+            },
+            "notes": [str(note) for note in self.notes],
+        }
+
+    @classmethod
+    def from_cache_payload(cls, payload: Dict[str, Any]) -> "_ExecutionPlanProfile":
+        stage_indices_raw = payload.get("stage_indices", [])
+        if not isinstance(stage_indices_raw, list):
+            stage_indices_raw = []
+        stage_indices = tuple(sorted(int(idx) for idx in stage_indices_raw))
+        unsupported_raw = payload.get("unsupported_by_operation", {})
+        unsupported_by_operation: Dict[str, int] = {}
+        if isinstance(unsupported_raw, dict):
+            for key, value in unsupported_raw.items():
+                try:
+                    unsupported_by_operation[str(key)] = int(value)
+                except Exception:
+                    continue
+        notes_raw = payload.get("notes", [])
+        notes = tuple(str(note) for note in notes_raw) if isinstance(notes_raw, list) else tuple()
+        return cls(
+            stage_indices=stage_indices,
+            stage_count=max(0, int(payload.get("stage_count", len(stage_indices)))),
+            unsupported_count=max(
+                0,
+                int(payload.get("unsupported_count", sum(unsupported_by_operation.values()))),
+            ),
+            unsupported_by_operation=unsupported_by_operation,
+            notes=notes,
+        )
+
+
 @dataclass
 class _NativeRuntimeSession:
     cpu_executor: Any
@@ -1917,6 +1996,11 @@ class GFSLKomputeRuntime:
         native_enable_boolean_compare: bool = True,
         native_enable_boolean_logic: bool = True,
         native_enable_list_query: bool = True,
+        plan_cache_enable: Optional[bool] = None,
+        plan_cache_max_entries: Optional[int] = None,
+        plan_disk_cache_enable: Optional[bool] = None,
+        plan_disk_cache_dir: Optional[str] = None,
+        plan_disk_cache_max_files: Optional[int] = None,
     ) -> None:
         self.planner = planner or GFSLKomputePlanner()
         self.execution_mode = self._normalize_execution_mode(execution_mode)
@@ -1927,6 +2011,37 @@ class GFSLKomputeRuntime:
         self.native_enable_list_query = bool(native_enable_list_query)
         self._last_native_stats: Optional[Dict[str, int]] = None
         self._native_sessions_local = threading.local()
+        self.plan_cache_enable = bool(
+            DEFAULT_KOMPUTE_PLAN_CACHE_ENABLE
+            if plan_cache_enable is None
+            else plan_cache_enable
+        )
+        cache_entries = (
+            DEFAULT_KOMPUTE_PLAN_CACHE_MAX_ENTRIES
+            if plan_cache_max_entries is None
+            else int(plan_cache_max_entries)
+        )
+        self.plan_cache_max_entries = max(64, int(cache_entries))
+        self.plan_disk_cache_enable = bool(
+            DEFAULT_KOMPUTE_PLAN_DISK_CACHE_ENABLE
+            if plan_disk_cache_enable is None
+            else plan_disk_cache_enable
+        )
+        disk_dir_text = (
+            DEFAULT_KOMPUTE_PLAN_DISK_CACHE_DIR
+            if plan_disk_cache_dir is None
+            else str(plan_disk_cache_dir)
+        )
+        self.plan_disk_cache_dir = str(disk_dir_text).strip()
+        disk_max_files = (
+            DEFAULT_KOMPUTE_PLAN_DISK_CACHE_MAX_FILES
+            if plan_disk_cache_max_files is None
+            else int(plan_disk_cache_max_files)
+        )
+        self.plan_disk_cache_max_files = max(256, int(disk_max_files))
+        self._profile_cache_lock = threading.Lock()
+        self._execution_profile_cache: "OrderedDict[str, _ExecutionPlanProfile]" = OrderedDict()
+        self._plan_cache_stats_local = threading.local()
 
     @staticmethod
     def _normalize_execution_mode(mode: str) -> str:
@@ -2211,6 +2326,288 @@ sys.exit(3)
         families = self._native_enabled_families()
         return tuple(sorted(str(family) for family in families))
 
+    def _plan_cache_stats_store(self) -> Dict[str, int]:
+        cached = getattr(self._plan_cache_stats_local, "stats", None)
+        if isinstance(cached, dict):
+            return cached
+        created = {
+            "plan_cache_ram_hits": 0,
+            "plan_cache_disk_hits": 0,
+            "plan_cache_misses": 0,
+            "plan_cache_disk_writes": 0,
+            "plan_cache_disk_write_failures": 0,
+        }
+        self._plan_cache_stats_local.stats = created
+        return created
+
+    def _reset_plan_cache_stats(self) -> None:
+        self._plan_cache_stats_local.stats = {
+            "plan_cache_ram_hits": 0,
+            "plan_cache_disk_hits": 0,
+            "plan_cache_misses": 0,
+            "plan_cache_disk_writes": 0,
+            "plan_cache_disk_write_failures": 0,
+        }
+
+    def _snapshot_plan_cache_stats(self) -> Dict[str, int]:
+        stats = self._plan_cache_stats_store()
+        return {str(k): int(v) for k, v in stats.items()}
+
+    def _add_plan_cache_stat(self, key: str, delta: int = 1) -> None:
+        stats = self._plan_cache_stats_store()
+        name = str(key).strip()
+        stats[name] = int(stats.get(name, 0)) + int(delta)
+
+    @staticmethod
+    def _normalize_order(order: str) -> str:
+        normalized = str(order).strip().lower()
+        if normalized not in {"effective", "execution"}:
+            return "effective"
+        return normalized
+
+    @staticmethod
+    def _hash_text(text: str) -> str:
+        return hashlib.md5(str(text).encode("utf-8")).hexdigest()
+
+    def _execution_profile_key(
+        self,
+        genome: GFSLGenome,
+        *,
+        order: str,
+        keep_vram_state: bool,
+        native_dispatch_only: bool,
+        native_enabled_families: set[str],
+    ) -> str:
+        order_norm = self._normalize_order(order)
+        if order_norm == "execution":
+            instruction_blob = "|".join(
+                instruction.get_signature() for instruction in genome.instructions
+            )
+            signature = self._hash_text(
+                f"execution:{instruction_blob}|count:{len(genome.instructions)}"
+            )
+        else:
+            try:
+                signature = str(genome.get_signature())
+            except Exception:
+                signature = self._hash_text(
+                    "|".join(
+                        instruction.get_signature() for instruction in genome.instructions
+                    )
+                )
+        outputs_blob = ";".join(
+            "{cat}:{dtype}:{idx}".format(
+                cat=int(category),
+                dtype=int(dtype),
+                idx=int(idx),
+            )
+            for category, dtype, idx in genome.outputs
+        )
+        outputs_sig = self._hash_text(outputs_blob)
+        families_key = ",".join(sorted(str(item) for item in native_enabled_families))
+        return (
+            "v2|sig={sig}|out={out}|len={length}|order={order}|keep_vram={keep}|native_only={native}|families={families}"
+        ).format(
+            sig=signature,
+            out=outputs_sig,
+            length=int(len(genome.instructions)),
+            order=order_norm,
+            keep=int(bool(keep_vram_state)),
+            native=int(bool(native_dispatch_only)),
+            families=families_key,
+        )
+
+    def _plan_disk_cache_base_dir(self) -> Optional[Path]:
+        if not bool(self.plan_disk_cache_enable):
+            return None
+        directory = str(self.plan_disk_cache_dir).strip()
+        if not directory:
+            return None
+        try:
+            path = Path(directory).expanduser()
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+        except Exception:
+            return None
+
+    def _plan_disk_cache_path(self, cache_key: str) -> Optional[Path]:
+        base = self._plan_disk_cache_base_dir()
+        if base is None:
+            return None
+        digest = self._hash_text(cache_key)
+        shard = base / digest[:2]
+        try:
+            shard.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return None
+        return shard / f"{digest}.json"
+
+    def _read_execution_profile_from_disk(
+        self,
+        *,
+        cache_key: str,
+    ) -> Optional[_ExecutionPlanProfile]:
+        cache_path = self._plan_disk_cache_path(cache_key)
+        if cache_path is None or not cache_path.is_file():
+            return None
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if int(payload.get("cache_version", 0)) != 2:
+            return None
+        if str(payload.get("key", "")).strip() != str(cache_key):
+            return None
+        profile_payload = payload.get("profile")
+        if not isinstance(profile_payload, dict):
+            return None
+        try:
+            profile = _ExecutionPlanProfile.from_cache_payload(profile_payload)
+        except Exception:
+            return None
+        try:
+            os.utime(cache_path, None)
+        except Exception:
+            pass
+        return profile
+
+    def _prune_plan_disk_cache(self) -> None:
+        max_files = int(self.plan_disk_cache_max_files)
+        if max_files <= 0:
+            return
+        base = self._plan_disk_cache_base_dir()
+        if base is None:
+            return
+        try:
+            files = [path for path in base.rglob("*.json") if path.is_file()]
+        except Exception:
+            return
+        if len(files) <= max_files:
+            return
+        files.sort(
+            key=lambda path: path.stat().st_mtime if path.exists() else 0.0
+        )
+        drop_count = max(0, len(files) - max_files)
+        for path in files[:drop_count]:
+            try:
+                path.unlink()
+            except Exception:
+                continue
+
+    def _write_execution_profile_to_disk(
+        self,
+        *,
+        cache_key: str,
+        profile: _ExecutionPlanProfile,
+    ) -> None:
+        cache_path = self._plan_disk_cache_path(cache_key)
+        if cache_path is None:
+            return
+        payload = {
+            "cache_version": 2,
+            "key": str(cache_key),
+            "saved_at_unix_s": float(time.time()),
+            "profile": profile.to_cache_payload(),
+        }
+        temp_path = cache_path.with_suffix(
+            f".tmp-{os.getpid()}-{threading.get_ident()}.json"
+        )
+        try:
+            temp_path.write_text(
+                json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                encoding="utf-8",
+            )
+            os.replace(temp_path, cache_path)
+            self._add_plan_cache_stat("plan_cache_disk_writes", 1)
+        except Exception:
+            self._add_plan_cache_stat("plan_cache_disk_write_failures", 1)
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except Exception:
+                pass
+            return
+        # Keep pruning infrequent to avoid cache I/O overhead on hot loops.
+        if int(self._plan_cache_stats_store().get("plan_cache_disk_writes", 0)) % 64 == 0:
+            self._prune_plan_disk_cache()
+
+    def _build_execution_profile(
+        self,
+        genome: GFSLGenome,
+        *,
+        order: str,
+        keep_vram_state: bool,
+        native_dispatch_only: bool,
+        native_enabled_families: set[str],
+    ) -> _ExecutionPlanProfile:
+        plan = self.planner.compose(
+            genome,
+            order=order,
+            keep_vram_state=keep_vram_state,
+            native_dispatch_only=native_dispatch_only,
+            native_enabled_families=native_enabled_families,
+        )
+        return _ExecutionPlanProfile.from_plan(plan)
+
+    def _cache_execution_profile(
+        self,
+        *,
+        cache_key: str,
+        profile: _ExecutionPlanProfile,
+    ) -> None:
+        if not bool(self.plan_cache_enable):
+            return
+        with self._profile_cache_lock:
+            self._execution_profile_cache[cache_key] = profile
+            self._execution_profile_cache.move_to_end(cache_key)
+            while len(self._execution_profile_cache) > int(self.plan_cache_max_entries):
+                self._execution_profile_cache.popitem(last=False)
+
+    def _get_or_build_execution_profile(
+        self,
+        genome: GFSLGenome,
+        *,
+        order: str,
+        keep_vram_state: bool,
+        native_dispatch_only: bool,
+        native_enabled_families: set[str],
+    ) -> _ExecutionPlanProfile:
+        cache_key = self._execution_profile_key(
+            genome,
+            order=order,
+            keep_vram_state=keep_vram_state,
+            native_dispatch_only=native_dispatch_only,
+            native_enabled_families=native_enabled_families,
+        )
+
+        if bool(self.plan_cache_enable):
+            with self._profile_cache_lock:
+                cached = self._execution_profile_cache.get(cache_key)
+                if cached is not None:
+                    self._execution_profile_cache.move_to_end(cache_key)
+                    self._add_plan_cache_stat("plan_cache_ram_hits", 1)
+                    return cached
+
+        profile_from_disk = self._read_execution_profile_from_disk(cache_key=cache_key)
+        if profile_from_disk is not None:
+            self._cache_execution_profile(cache_key=cache_key, profile=profile_from_disk)
+            self._add_plan_cache_stat("plan_cache_disk_hits", 1)
+            return profile_from_disk
+
+        self._add_plan_cache_stat("plan_cache_misses", 1)
+        built = self._build_execution_profile(
+            genome,
+            order=order,
+            keep_vram_state=keep_vram_state,
+            native_dispatch_only=native_dispatch_only,
+            native_enabled_families=native_enabled_families,
+        )
+        self._cache_execution_profile(cache_key=cache_key, profile=built)
+        self._write_execution_profile_to_disk(cache_key=cache_key, profile=built)
+        return built
+
     def _get_native_runtime_session(self) -> _NativeRuntimeSession:
         session_key = self._native_session_key()
         store = self._native_session_store()
@@ -2269,12 +2666,21 @@ sys.exit(3)
             if native_dispatch_only is not None
             else self._resolve_execute_mode() == "native"
         )
-        return self.planner.compatibility_report(
+        profile = self._get_or_build_execution_profile(
             genome,
             order=order,
             keep_vram_state=keep_vram_state,
             native_dispatch_only=native_only,
             native_enabled_families=native_families,
+        )
+        return KomputeCompatibilityReport(
+            stage_count=int(profile.stage_count),
+            unsupported_count=int(profile.unsupported_count),
+            unsupported_by_operation={
+                str(name): int(count)
+                for name, count in profile.unsupported_by_operation.items()
+            },
+            notes=tuple(str(note) for note in profile.notes),
         )
 
     def compile(
@@ -2326,19 +2732,23 @@ sys.exit(3)
     ) -> Dict[str, Any]:
         """Execute genome through native or simulated Kompute runtime."""
         self._last_native_stats = None
+        self._reset_plan_cache_stats()
         mode = self._resolve_execute_mode()
-        plan = self.compose(
+        native_families = self._native_enabled_families()
+        native_only = mode == "native"
+        profile = self._get_or_build_execution_profile(
             genome,
             order=order,
             keep_vram_state=keep_vram_state,
-            native_dispatch_only=(mode == "native"),
+            native_dispatch_only=native_only,
+            native_enabled_families=native_families,
         )
-        if not plan.stages:
+        if int(profile.stage_count) <= 0:
             raise RuntimeError("Kompute plan produced no executable stages.")
         if mode == "native":
             return self._execute_native(
                 genome,
-                plan=plan,
+                stage_indices=set(int(idx) for idx in profile.stage_indices),
                 inputs=inputs,
                 track_activity=track_activity,
                 activity_tick=activity_tick,
@@ -2348,7 +2758,6 @@ sys.exit(3)
         if mode == "simulated":
             return self._execute_simulated(
                 genome,
-                plan=plan,
                 inputs=inputs,
                 track_activity=track_activity,
                 activity_tick=activity_tick,
@@ -2361,14 +2770,13 @@ sys.exit(3)
         self,
         genome: GFSLGenome,
         *,
-        plan: KomputeExecutionPlan,
+        stage_indices: set[int],
         inputs: Optional[Dict[str, Any]],
         track_activity: Optional[bool],
         activity_tick: Optional[int],
         order: str,
         keep_vram_state: bool,
     ) -> Dict[str, Any]:
-        _ = plan
         if not self._has_kp_bindings():
             raise ModuleNotFoundError(
                 "Kompute bindings are not installed (`kp` import failed)."
@@ -2387,7 +2795,6 @@ sys.exit(3)
         cpu_executor._index_functions(genome)
         bridge.prepare_for_execution(keep_vram_state=keep_vram_state)
         selected_indices = self._selected_indices(genome, order=order)
-        stage_indices = {int(stage.instruction_index) for stage in plan.stages}
 
         for idx in cpu_executor._main_execution_indices(selected_indices):
             if idx < 0 or idx >= len(genome.instructions):
@@ -2428,6 +2835,7 @@ sys.exit(3)
             "cpu_synced_tensors": int(bridge.cpu_synced_tensors),
             "final_sync_count": int(final_sync_count),
         }
+        self._last_native_stats.update(self._snapshot_plan_cache_stats())
 
         should_track = (
             cpu_executor.track_instruction_activity
@@ -2507,17 +2915,15 @@ sys.exit(3)
         self,
         genome: GFSLGenome,
         *,
-        plan: KomputeExecutionPlan,
         inputs: Optional[Dict[str, Any]],
         track_activity: Optional[bool],
         activity_tick: Optional[int],
     ) -> Dict[str, Any]:
-        _ = plan
         # Reuse trusted CPU executor semantics while forcing Kompute plan compatibility.
         from .executor import GFSLExecutor
 
         cpu_executor = GFSLExecutor(compute_backend="cpu")
-        self._last_native_stats = None
+        self._last_native_stats = self._snapshot_plan_cache_stats()
         return cpu_executor.execute(
             genome,
             inputs=inputs,

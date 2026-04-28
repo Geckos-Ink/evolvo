@@ -27,6 +27,11 @@ from .settings import (
     DEFAULT_KOMPUTE_NATIVE_ENABLE_BOOLEAN_LOGIC,
     DEFAULT_KOMPUTE_NATIVE_ENABLE_DECIMAL,
     DEFAULT_KOMPUTE_NATIVE_ENABLE_LIST_QUERY,
+    DEFAULT_KOMPUTE_PLAN_CACHE_ENABLE,
+    DEFAULT_KOMPUTE_PLAN_CACHE_MAX_ENTRIES,
+    DEFAULT_KOMPUTE_PLAN_DISK_CACHE_DIR,
+    DEFAULT_KOMPUTE_PLAN_DISK_CACHE_ENABLE,
+    DEFAULT_KOMPUTE_PLAN_DISK_CACHE_MAX_FILES,
     DEFAULT_KOMPUTE_RUNTIME_MODE,
     DEFAULT_KOMPUTE_WARN_ON_FALLBACK,
 )
@@ -75,6 +80,11 @@ class GFSLExecutor:
         kompute_native_enable_boolean_compare: Optional[bool] = None,
         kompute_native_enable_boolean_logic: Optional[bool] = None,
         kompute_native_enable_list_query: Optional[bool] = None,
+        kompute_plan_cache_enable: Optional[bool] = None,
+        kompute_plan_cache_max_entries: Optional[int] = None,
+        kompute_plan_disk_cache_enable: Optional[bool] = None,
+        kompute_plan_disk_cache_dir: Optional[str] = None,
+        kompute_plan_disk_cache_max_files: Optional[int] = None,
     ):
         self.allow_function_external_writes = bool(allow_function_external_writes)
         self.allow_nested_functions = bool(allow_nested_functions)
@@ -162,6 +172,34 @@ class GFSLExecutor:
             if kompute_native_enable_list_query is None
             else kompute_native_enable_list_query
         )
+        self.kompute_plan_cache_enable = bool(
+            DEFAULT_KOMPUTE_PLAN_CACHE_ENABLE
+            if kompute_plan_cache_enable is None
+            else kompute_plan_cache_enable
+        )
+        plan_cache_entries = (
+            DEFAULT_KOMPUTE_PLAN_CACHE_MAX_ENTRIES
+            if kompute_plan_cache_max_entries is None
+            else int(kompute_plan_cache_max_entries)
+        )
+        self.kompute_plan_cache_max_entries = max(64, int(plan_cache_entries))
+        self.kompute_plan_disk_cache_enable = bool(
+            DEFAULT_KOMPUTE_PLAN_DISK_CACHE_ENABLE
+            if kompute_plan_disk_cache_enable is None
+            else kompute_plan_disk_cache_enable
+        )
+        disk_cache_dir = (
+            DEFAULT_KOMPUTE_PLAN_DISK_CACHE_DIR
+            if kompute_plan_disk_cache_dir is None
+            else str(kompute_plan_disk_cache_dir)
+        )
+        self.kompute_plan_disk_cache_dir = str(disk_cache_dir).strip()
+        disk_cache_max_files = (
+            DEFAULT_KOMPUTE_PLAN_DISK_CACHE_MAX_FILES
+            if kompute_plan_disk_cache_max_files is None
+            else int(kompute_plan_disk_cache_max_files)
+        )
+        self.kompute_plan_disk_cache_max_files = max(256, int(disk_cache_max_files))
         self._kompute_runtime: Any = None
         self._kompute_runtime_checked = False
         self._kompute_warned_keys: Set[str] = set()
@@ -244,6 +282,11 @@ class GFSLExecutor:
             "cpu_no_sync_count": 0,
             "cpu_synced_tensors": 0,
             "final_sync_count": 0,
+            "plan_cache_ram_hits": 0,
+            "plan_cache_disk_hits": 0,
+            "plan_cache_misses": 0,
+            "plan_cache_disk_writes": 0,
+            "plan_cache_disk_write_failures": 0,
         }
 
     def last_execution_stats(self) -> Dict[str, Any]:
@@ -412,6 +455,11 @@ class GFSLExecutor:
             ),
             native_enable_boolean_logic=bool(self.kompute_native_enable_boolean_logic),
             native_enable_list_query=bool(self.kompute_native_enable_list_query),
+            plan_cache_enable=bool(self.kompute_plan_cache_enable),
+            plan_cache_max_entries=int(self.kompute_plan_cache_max_entries),
+            plan_disk_cache_enable=bool(self.kompute_plan_disk_cache_enable),
+            plan_disk_cache_dir=str(self.kompute_plan_disk_cache_dir),
+            plan_disk_cache_max_files=int(self.kompute_plan_disk_cache_max_files),
         )
         return self._kompute_runtime
 
@@ -540,90 +588,91 @@ class GFSLExecutor:
                         raise RuntimeError(message)
                     self._warn_kompute_fallback_once(f"unsupported:{signature}", message)
                 return None
-
-        try:
-            report = runtime.compatibility_report(
-                genome,
-                keep_vram_state=bool(self.kompute_keep_vram_state),
-            )
-        except Exception as exc:
-            message = (
-                "Kompute compatibility pre-check failed ({error}); "
-                "falling back to CPU execution."
-            ).format(error=str(exc))
-            if self.kompute_fail_hard:
-                raise RuntimeError(message) from exc
-            self._warn_kompute_fallback_once("compatibility-error", message)
-            return None
-
-        unsupported_count = int(getattr(report, "unsupported_count", 0))
-        stage_count = int(getattr(report, "stage_count", 0))
-        unsupported_by_operation = getattr(report, "unsupported_by_operation", {})
-        if not isinstance(unsupported_by_operation, dict):
-            unsupported_by_operation = {}
-        if stage_count <= 0:
-            reason = "stages=0"
-            self._kompute_support_cache[signature] = (False, reason)
-            if forced_backend:
-                message = (
-                    "Kompute compatibility pre-check found no GPU-dispatchable stages for "
-                    f"genome signature `{signature[:16]}`; falling back to CPU execution."
+            # Known-good compatibility state for this signature: skip repeat pre-check.
+        else:
+            try:
+                report = runtime.compatibility_report(
+                    genome,
+                    keep_vram_state=bool(self.kompute_keep_vram_state),
                 )
+            except Exception as exc:
+                message = (
+                    "Kompute compatibility pre-check failed ({error}); "
+                    "falling back to CPU execution."
+                ).format(error=str(exc))
                 if self.kompute_fail_hard:
-                    raise RuntimeError(message)
-                self._warn_kompute_fallback_once(f"unsupported:{signature}", message)
-            return None
+                    raise RuntimeError(message) from exc
+                self._warn_kompute_fallback_once("compatibility-error", message)
+                return None
 
-        top = sorted(
-            (
-                (str(name), int(count))
-                for name, count in unsupported_by_operation.items()
-            ),
-            key=lambda item: item[1],
-            reverse=True,
-        )[:6]
-        top_text = ", ".join(f"{name}x{count}" for name, count in top) or "none"
-        coverage_reject_reason = self._kompute_coverage_reject_reason(
-            stage_count=stage_count,
-            unsupported_count=unsupported_count,
-        )
-        if coverage_reject_reason:
-            reason = (
-                "coverage-policy={policy}; stages={stage_count}, unsupported={unsupported_count}, top=[{top}]"
-            ).format(
-                policy=coverage_reject_reason,
+            unsupported_count = int(getattr(report, "unsupported_count", 0))
+            stage_count = int(getattr(report, "stage_count", 0))
+            unsupported_by_operation = getattr(report, "unsupported_by_operation", {})
+            if not isinstance(unsupported_by_operation, dict):
+                unsupported_by_operation = {}
+            if stage_count <= 0:
+                reason = "stages=0"
+                self._kompute_support_cache[signature] = (False, reason)
+                if forced_backend:
+                    message = (
+                        "Kompute compatibility pre-check found no GPU-dispatchable stages for "
+                        f"genome signature `{signature[:16]}`; falling back to CPU execution."
+                    )
+                    if self.kompute_fail_hard:
+                        raise RuntimeError(message)
+                    self._warn_kompute_fallback_once(f"unsupported:{signature}", message)
+                return None
+
+            top = sorted(
+                (
+                    (str(name), int(count))
+                    for name, count in unsupported_by_operation.items()
+                ),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:6]
+            top_text = ", ".join(f"{name}x{count}" for name, count in top) or "none"
+            coverage_reject_reason = self._kompute_coverage_reject_reason(
                 stage_count=stage_count,
                 unsupported_count=unsupported_count,
-                top=top_text,
             )
-            self._kompute_support_cache[signature] = (False, reason)
-            if forced_backend:
-                message = (
-                    "Kompute execution policy rejected native hybrid path for genome signature "
-                    f"`{signature[:16]}` ({reason}); falling back to CPU execution."
+            if coverage_reject_reason:
+                reason = (
+                    "coverage-policy={policy}; stages={stage_count}, unsupported={unsupported_count}, top=[{top}]"
+                ).format(
+                    policy=coverage_reject_reason,
+                    stage_count=stage_count,
+                    unsupported_count=unsupported_count,
+                    top=top_text,
                 )
-                if self.kompute_fail_hard:
-                    raise RuntimeError(message)
-                self._warn_kompute_fallback_once(
-                    f"coverage-policy:{signature}",
-                    message,
-                )
-            return None
+                self._kompute_support_cache[signature] = (False, reason)
+                if forced_backend:
+                    message = (
+                        "Kompute execution policy rejected native hybrid path for genome signature "
+                        f"`{signature[:16]}` ({reason}); falling back to CPU execution."
+                    )
+                    if self.kompute_fail_hard:
+                        raise RuntimeError(message)
+                    self._warn_kompute_fallback_once(
+                        f"coverage-policy:{signature}",
+                        message,
+                    )
+                return None
 
-        if unsupported_count > 0:
-            reason = (
-                f"stages={stage_count}, unsupported={unsupported_count}, top=[{top_text}]"
-            )
-            self._kompute_support_cache[signature] = (True, f"partial:{reason}")
-            if forced_backend:
-                message = (
-                    "Kompute compatibility pre-check indicates partial native coverage for "
-                    f"genome signature `{signature[:16]}` ({reason}); unsupported stages "
-                    "will run on CPU fallback."
+            if unsupported_count > 0:
+                reason = (
+                    f"stages={stage_count}, unsupported={unsupported_count}, top=[{top_text}]"
                 )
-                self._warn_kompute_fallback_once("partial-coverage", message)
-        else:
-            self._kompute_support_cache[signature] = (True, "compatible")
+                self._kompute_support_cache[signature] = (True, f"partial:{reason}")
+                if forced_backend:
+                    message = (
+                        "Kompute compatibility pre-check indicates partial native coverage for "
+                        f"genome signature `{signature[:16]}` ({reason}); unsupported stages "
+                        "will run on CPU fallback."
+                    )
+                    self._warn_kompute_fallback_once("partial-coverage", message)
+            else:
+                self._kompute_support_cache[signature] = (True, "compatible")
 
         try:
             outputs = runtime.execute(
@@ -649,6 +698,13 @@ class GFSLExecutor:
             no_sync = int(stats_dict.get("cpu_no_sync_count", 0))
             synced = int(stats_dict.get("cpu_synced_tensors", 0))
             final_sync = int(stats_dict.get("final_sync_count", 0))
+            plan_cache_ram_hits = int(stats_dict.get("plan_cache_ram_hits", 0))
+            plan_cache_disk_hits = int(stats_dict.get("plan_cache_disk_hits", 0))
+            plan_cache_misses = int(stats_dict.get("plan_cache_misses", 0))
+            plan_cache_disk_writes = int(stats_dict.get("plan_cache_disk_writes", 0))
+            plan_cache_disk_write_failures = int(
+                stats_dict.get("plan_cache_disk_write_failures", 0)
+            )
             self._last_execution_stats = {
                 "backend": f"kompute:{resolved_mode}",
                 "used_kompute": True,
@@ -659,6 +715,14 @@ class GFSLExecutor:
                 "cpu_no_sync_count": max(0, no_sync),
                 "cpu_synced_tensors": max(0, synced),
                 "final_sync_count": max(0, final_sync),
+                "plan_cache_ram_hits": max(0, plan_cache_ram_hits),
+                "plan_cache_disk_hits": max(0, plan_cache_disk_hits),
+                "plan_cache_misses": max(0, plan_cache_misses),
+                "plan_cache_disk_writes": max(0, plan_cache_disk_writes),
+                "plan_cache_disk_write_failures": max(
+                    0,
+                    plan_cache_disk_write_failures,
+                ),
             }
             if forced_backend and isinstance(stats, dict):
                 if cpu_fallback > 0:

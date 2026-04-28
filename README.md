@@ -190,6 +190,10 @@ Both approaches respect GFSL’s fixed-slot constraints; the supervised guide si
 - Native mode dispatches supported scalar stages (`DECIMAL_OPS`, boolean compare/logic) via Vulkan shaders and transparently executes unsupported stages on CPU with synchronized state.
 - Native mode supports both kp sync API variants: explicit sync ops (`OpSyncDevice`/`OpSyncLocal` or `OpTensorSyncDevice`/`OpTensorSyncLocal`) and shared-memory fallback mode when those ops are unavailable.
 - Before execution, a compatibility pre-check reports unsupported op names/counts (for example `CALLx1, FUNCx1`) and enables hybrid fallback when needed.
+- Kompute execution-profile caching is enabled by default to reduce planner/pre-check overhead in tight loops:
+  - In-memory cache: `EVOLVO_KOMPUTE_PLAN_CACHE_ENABLE=1` and `EVOLVO_KOMPUTE_PLAN_CACHE_MAX_ENTRIES=8192`.
+  - Disk cache: `EVOLVO_KOMPUTE_PLAN_DISK_CACHE_ENABLE=1` and `EVOLVO_KOMPUTE_PLAN_DISK_CACHE_DIR=~/.cache/evolvo/kompute-plan-cache`.
+  - Disk cache size cap (file-count LRU pruning): `EVOLVO_KOMPUTE_PLAN_DISK_CACHE_MAX_FILES=20000`.
 - If Vulkan picks the wrong device/queue on multi-GPU hosts, set `EVOLVO_KOMPUTE_DEVICE_INDEX` and optionally `EVOLVO_KOMPUTE_QUEUE_FAMILY`.
 - When Kompute is enabled, process-pool evaluation is auto-switched to thread mode unless `EVOLVO_KOMPUTE_ALLOW_PROCESS_POOL=1` is set, to avoid Vulkan instability in fork-heavy runs.
 - In `auto` mode, Kompute is process-disabled after the first non-recoverable runtime failure to avoid warning spam in large evaluation loops.

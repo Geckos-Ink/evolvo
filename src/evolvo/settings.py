@@ -51,6 +51,13 @@ def _env_choice(name: str, default: str, allowed: set[str]) -> str:
     return candidate
 
 
+def _env_text(name: str, default: str) -> str:
+    raw = os.environ.get(name)
+    if raw is None:
+        return str(default)
+    return str(raw).strip()
+
+
 # High-level backend selection.
 DEFAULT_COMPUTE_BACKEND = _env_choice(
     "EVOLVO_EXECUTOR_BACKEND",
@@ -114,6 +121,30 @@ DEFAULT_KOMPUTE_NATIVE_ENABLE_LIST_QUERY = _env_bool(
     True,
 )
 
+# Kompute execution-profile caching (planner/compatibility metadata).
+DEFAULT_KOMPUTE_PLAN_CACHE_ENABLE = _env_bool(
+    "EVOLVO_KOMPUTE_PLAN_CACHE_ENABLE",
+    True,
+)
+DEFAULT_KOMPUTE_PLAN_CACHE_MAX_ENTRIES = _env_int(
+    "EVOLVO_KOMPUTE_PLAN_CACHE_MAX_ENTRIES",
+    8192,
+    minimum=64,
+)
+DEFAULT_KOMPUTE_PLAN_DISK_CACHE_ENABLE = _env_bool(
+    "EVOLVO_KOMPUTE_PLAN_DISK_CACHE_ENABLE",
+    True,
+)
+DEFAULT_KOMPUTE_PLAN_DISK_CACHE_DIR = _env_text(
+    "EVOLVO_KOMPUTE_PLAN_DISK_CACHE_DIR",
+    os.path.join(os.path.expanduser("~"), ".cache", "evolvo", "kompute-plan-cache"),
+)
+DEFAULT_KOMPUTE_PLAN_DISK_CACHE_MAX_FILES = _env_int(
+    "EVOLVO_KOMPUTE_PLAN_DISK_CACHE_MAX_FILES",
+    20000,
+    minimum=256,
+)
+
 
 __all__ = [
     "DEFAULT_COMPUTE_BACKEND",
@@ -130,4 +161,9 @@ __all__ = [
     "DEFAULT_KOMPUTE_NATIVE_ENABLE_BOOLEAN_COMPARE",
     "DEFAULT_KOMPUTE_NATIVE_ENABLE_BOOLEAN_LOGIC",
     "DEFAULT_KOMPUTE_NATIVE_ENABLE_LIST_QUERY",
+    "DEFAULT_KOMPUTE_PLAN_CACHE_ENABLE",
+    "DEFAULT_KOMPUTE_PLAN_CACHE_MAX_ENTRIES",
+    "DEFAULT_KOMPUTE_PLAN_DISK_CACHE_ENABLE",
+    "DEFAULT_KOMPUTE_PLAN_DISK_CACHE_DIR",
+    "DEFAULT_KOMPUTE_PLAN_DISK_CACHE_MAX_FILES",
 ]
