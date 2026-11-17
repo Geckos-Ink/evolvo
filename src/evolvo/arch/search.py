@@ -114,13 +114,15 @@ class ArchitectureSearch:
         *,
         seed: int = 0,
         population: int = 12,
-        elite: int = 3,
+        elite: Optional[int] = None,
         tournament: int = 3,
         size_cost: float = 0.03,
         knowledge: Optional[Knowledge] = None,
         temperature: float = 0.12,
         explore: float = 0.15,
     ) -> None:
+        if elite is None:
+            elite = max(1, population // 4)
         if population < 2 or not 1 <= elite < population or tournament < 1:
             raise ValueError("population >= 2, 1 <= elite < population and tournament >= 1")
         if size_cost < 0 or not math.isfinite(size_cost):

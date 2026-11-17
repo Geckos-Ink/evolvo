@@ -226,7 +226,7 @@ class SearchTests(unittest.TestCase):
         again = Knowledge.from_dict(data)
         self.assertEqual(again.policy.count, search.knowledge.policy.count)
         failing = ArchitectureSearch(space, lambda *a: (_ for _ in ()).throw(RuntimeError("boom")),
-                                     seed=0, population=3, elite=1)
+                                     seed=0, population=3)
         self.assertIsNone(failing.run(generations=1)["best"])
 
 
