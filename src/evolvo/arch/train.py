@@ -127,6 +127,9 @@ class TorchTask:
         self.best_module = None
         self.best_signature: Optional[str] = None
         self.best_curve: Optional[list] = None
+        # The module of the most recent evaluation, so a wrapper can keep candidates that
+        # satisfy its own constraint (e.g. an exportable form) besides the lowest-loss one.
+        self.last_module = None
 
     def __call__(self, space: ArchSpace, genome: ArchGenome, info: Mapping[str, Any]) -> Dict[str, Any]:
         module = build_module(space, genome, seed=info.get("seed", 0))
@@ -147,6 +150,7 @@ class TorchTask:
             stopper.record()
         result["params"] = params
         result["loss"] = result.pop("val_loss")
+        self.last_module = module
         if math.isfinite(result["loss"]) and result["loss"] < self.best_loss:
             self.best_loss = result["loss"]
             self.best_module = module
