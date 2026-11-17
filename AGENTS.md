@@ -5,6 +5,7 @@ This file contains the directives for AIs, and has to be updated by AIs itself t
 Quick guidance for AI assistants working in this repository.
 
 ## Source of truth
+- `papers/GFSL-NN.md` defines the neural-architecture language in `src/evolvo/arch/`.
 - `papers/GFSL-definition.md` defines the GFSL slot semantics and constraints.
 
 ## Repo layout (src-based)
@@ -25,7 +26,26 @@ Quick guidance for AI assistants working in this repository.
   - `qlearning.py` - GFSLQLearningGuide.
   - `supervised.py` - GFSLFeatureExtractor + GFSLSupervisedGuide.
   - `demos.py` - example_formula_discovery + example_neural_architecture_search.
+- `src/evolvo/arch/` - GFSL-NN (pure Python except `build.py`/`train.py`, which import torch):
+  - `language.py` - Shape (vec/set + origin), OpSpec/OpRegistry (primitives + macros), ArgSpec domains
+    (width ladder, depth, choice, divisor, space lists), ArchSpace (cascading options, budget masks,
+    repair, validate, lower, signature, to_slots, decisions), Emitter (macro expansion), Chooser.
+  - `stats.py` - ContextualStats: sliding-window records, greedy adjusted-gain feature order (pinned
+    features first), prefix-group aggregates, shrinkage estimate (`count` 0 for an unseen group,
+    `matched`/`evidence` for the deepest observed one), JSON round trip.
+  - `policy.py` - AdaptivePolicy (softmax over shrunk reward + optimism, uniform floor, prior hooks),
+    size_prior.
+  - `efficiency.py` - EfficiencyModel (frontier per half-octave, relative-error power-law fit,
+    efficient_size, pressure).
+  - `stopping.py` - PlateauStopper (plateau / hopeless at equal effort / diverged / hard cap; learned
+    patience from `gap` stats; records outcomes).
+  - `search.py` - ArchitectureSearch (quantile rewards, learned mutation choice, repair after every
+    edit, signature cache, window adaptation, converged/budget stops), Knowledge (save/load).
+  - `build.py` - GenomeModule (traceable), build_module, parameter_count, trace_module.
+  - `train.py` - train_module (AdamW, best-epoch restore), TorchTask (shares the search's epoch stats).
 - `example.py` and `examples/` scripts auto-insert `src/` into `sys.path` for local runs.
+- `src/evolvo/__init__.py` resolves public names lazily (PEP 562 `__getattr__`); keep new exports in
+  its `_LAZY` table so pure-Python subpackages import without NumPy.
 - Function-focused smoke demos:
   - `examples/function_flow.py` - typed function call + activity-based pruning.
   - `examples/nested_function_flow.py` - nested function execution (enabled/disabled comparison).
@@ -34,7 +54,7 @@ Quick guidance for AI assistants working in this repository.
 ## Usage notes
 - When running ad-hoc scripts from the repo, set `PYTHONPATH=src` or use the provided scripts that bootstrap the path.
 - `custom_operations` is a global registry; `ValueEnumerations` consults it for custom value enumerations.
-- `src/evolvo/__init__.py` re-exports the public API; prefer `from evolvo import ...`.
+- `src/evolvo/__init__.py` re-exports the public API lazily; prefer `from evolvo import ...`.
 - `GFSLExecutor` supports `compute_backend=auto|cpu|kompute|kompute-sim`. `auto` is safest; `kompute` attempts native runtime and falls back to CPU on runtime/kernel failures (unless `kompute_fail_hard=True`); `kompute-sim` runs compatibility/planning plus CPU-backed simulated execution.
 - Native Kompute runtime now supports both kp API styles: explicit sync ops (`OpSyncDevice`/`OpSyncLocal` or `OpTensorSyncDevice`/`OpTensorSyncLocal`) and shared-memory fallback when those ops are absent.
 - With Kompute enabled, process-pool evaluation is auto-switched to thread mode by default (`EVOLVO_KOMPUTE_ALLOW_PROCESS_POOL=1` can re-enable process pools).
@@ -89,14 +109,26 @@ Quick guidance for AI assistants working in this repository.
   - `prune_stale_instructions(min_hits=..., max_idle_ticks=..., keep_effective=True)` removes stale instructions while preserving currently effective ones by default.
   - `rebuild_validator_state()` is available to recompute validator counters after bulk edits.
 
+## GFSL-NN invariants
+- Every genome reaching evaluation went through `ArchSpace.repair` (sampling, mutation, crossover);
+  `validate()` must return `[]` for all of them. Never add an op whose options are not enumerable.
+- Arg option lists must be ascending in cost (the budget mask assumes the first option is cheapest).
+- Rewards are attributed through `ArchSpace.decisions(genome)`, never through the sampling trace.
+- Runs stopped as `hopeless` are censored: they rank but neither teach epoch stats nor enter the
+  efficiency frontier. A learned value never stops a still-improving run (only the hard cap does).
+- Determinism: one `random.Random(seed)` per search; candidate *i* uses torch seed `seed*1_000_003+i`.
+
 ## Suggested verification
-- No automated test suite; run:
+- `PYTHONPATH=src python -m unittest discover -s tests` (GFSL-NN; torch cases self-skip).
+- Legacy GFSL has no automated suite; run:
   - `python3 example.py function`
   - `python3 example.py nested`
   - `python3 example.py void`
   - `python3 examples/*.py`
 
 ## Roadmap / next steps
+- GFSL-NN: masked/padded set inputs; macro mining (promote recurring elite fragments to macros);
+  FLOP/latency cost terms; multi-fidelity schedules beyond hopeless stopping; ONNX export.
 - Operation conversion table (map ops to alternatives per device profile using weights).
 - Add recursion-guard stress tests (`max_call_depth`) and activity-pruning policy sweeps.
 - Expand native Kompute coverage beyond scalar decimal/boolean kernels (lists/tensors/control-flow-aware lowering and lower-overhead persistent dispatch across repeated evaluations).

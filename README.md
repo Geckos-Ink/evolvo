@@ -15,6 +15,7 @@ The project reimplements the **Genetic Fixed Structure Language (GFSL)** as desc
 - **Effective algorithm extraction** so execution only touches the instructions that matter.
 - **Targeted operation extraction** to pull only the dependencies for specific result references.
 - **Neural architecture support** via `RecursiveModelBuilder`, enabling GFSL to describe CNN/MLP topologies (requires PyTorch).
+- **GFSL-NN architecture search** (`evolvo.arch`): a fixed 7-slot genetic language for torch models (vector and set tensors, attention, residuals, feature tokens). It has macros with integer arguments (`mlp`, `resmlp`, `transformer`, `deepsets`, user macros), cascading validity, and slot weights learned during search. Group types are discovered, not enumerated. Each candidate stops training automatically at its plateau, and a learned loss-versus-size frontier steers architecture size. Spec: [`papers/GFSL-NN.md`](papers/GFSL-NN.md).
 - **Hybrid guidance**:
   - `GFSLQLearningGuide` learns slot choices with tabular Q-learning.
   - `GFSLSupervisedGuide` is a PyTorch model that predicts fitness and proposes smarter mutations (optional; skip if PyTorch is unavailable).
@@ -130,7 +131,9 @@ print(best.to_human_readable())
 
 ## Source Layout
 
-- `src/evolvo/` - modular package code (enums, slot utilities, validator, genome, executor, evolver, guidance models).
+- `src/evolvo/` - modular package code (enums, slot utilities, validator, genome, executor, evolver, guidance models). Public names load lazily, so `import evolvo` does not import NumPy until a NumPy-backed class is used.
+- `src/evolvo/arch/` - GFSL-NN: `language` (rows, ops, macros, cascading validity, repair, lowering), `stats` (contextual statistics with discovered groups), `policy` (learned slot weights), `efficiency` (size frontier), `stopping` (learned plateau stopping), `search` (evolution + knowledge), `build`/`train` (PyTorch).
+- `tests/` - `python -m unittest discover -s tests` (the PyTorch cases skip without torch).
 - `example.py` and `examples/` - runnable scripts that bootstrap `src/` into `sys.path` for local runs.
 
 ---
@@ -145,6 +148,7 @@ Practical scripts live in `examples/`:
 - `examples/function_flow.py` — typed function declaration/call plus activity-based stale-instruction pruning.
 - `examples/nested_function_flow.py` — nested function behavior (`allow_nested_functions=True/False`) side-by-side.
 - `examples/void_external_write_flow.py` — void function behavior with isolated scope vs. external writes.
+- `examples/arch_search_flow.py [knowledge.json]` — GFSL-NN architecture search with learned stopping and size steering on a synthetic regression; reuses and updates a knowledge file.
 
 ---
 
@@ -214,6 +218,31 @@ outputs = executor.execute(genome, {"d$0": 3.0})
 
 The Kompute path is planner-first and still experimental. Unsupported kernels or runtime failures emit a warning and continue on CPU fallback.
 Use `kompute-sim` for fast compatibility/planning validation without native Vulkan dispatch.
+
+---
+
+## GFSL-NN: Evolving Torch Architectures
+
+`evolvo.arch` describes a model as fixed rows `[target, op, src_a, src_b, arg0, arg1, arg2]`. Each option is enumerated and checked against the shapes and the parameter budget, so every genome builds:
+
+```python
+from evolvo.arch import ArchSpace, ArchitectureSearch, Knowledge
+from evolvo.arch.train import TorchTask
+
+space = ArchSpace([("vec", 4)], 1, max_rows=5, max_params=30_000)
+task = TorchTask((x_train, y_train), (x_val, y_val), lr=5e-3)      # learned plateau stopping
+search = ArchitectureSearch(space, task, seed=1, knowledge=Knowledge.load("k.json"))
+report = search.run(generations=10, patience=4)                    # stops when converged
+print("\n".join(report["best"]["describe"]))
+search.knowledge.save("k.json")                                    # tendencies for next time
+```
+
+- **Macros**: `mlp(units, depth, act)`, `resmlp(depth, ratio, act)`, `transformer(depth, heads, ff)` and `deepsets(units, depth, pool)` are single genes. `register_macro` adds your own.
+- **Learned weights**: `AdaptivePolicy` samples each slot (and the mutation operator) by the reward its choices earned, per context. `ContextualStats` decides which context features define groups, using adjusted variance gain and hierarchical shrinkage.
+- **Efficiency**: score = `ln(loss) + c·ln(params)`. `EfficiencyModel` fits the loss/size frontier and pushes sizes toward where another doubling stops paying. The width window widens only where elite genomes press against it.
+- **Stopping**: `PlateauStopper` stops each candidate when learning stops paying (learned patience, equal-effort hopeless check). The search stops when its best score converges.
+
+See [`papers/GFSL-NN.md`](papers/GFSL-NN.md) for the full specification.
 
 ---
 
@@ -608,10 +637,10 @@ They remain useful for validating the baseline evolver and seeing the raw GFSL o
 ## Roadmap Ideas
 
 - Gradient-informed mutation proposals (hybrid neuro-evolution).
-- Additional tensor ops (attention, modern normalization layers).
+- Masked (padded) set inputs and macro mining from recurring elite fragments in GFSL-NN.
 - Benchmarks comparing supervised guidance vs. unguided baselines.
 - Operation conversion tables and device-targeted weight profiles.
-- Exporters for ONNX / TorchScript from GFSL neural genomes.
+- ONNX export for GFSL-NN modules (TorchScript tracing already works).
 
 ---
 
