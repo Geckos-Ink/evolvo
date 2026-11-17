@@ -140,7 +140,8 @@ file, so later searches on similar tasks start from what earlier ones learned.
 
 `PlateauStopper` ends a candidate's training on:
 
-- `plateau`: no relative improvement > `rel_tol` for `max(patience, relative_patience × epochs)`;
+- `plateau`: no relative improvement > `rel_tol` for `max(patience, relative_patience × epochs)`,
+  measured from the best loss at the last counted improvement (slow steady gains add up);
 - `hopeless`: after `hopeless_min_epochs`, the run is behind the incumbent at equal effort (its
   best after *t* epochs is worse than the incumbent's best after *t* epochs by a margin) and
   worse than the incumbent's final loss, and its fitted learning curve `a + b·t^−α` does not

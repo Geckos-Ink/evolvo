@@ -2,7 +2,10 @@
 
 :class:`PlateauStopper` watches a validation loss once per epoch and stops for one of:
 
-* ``plateau``: no relative improvement larger than ``rel_tol`` for ``patience`` epochs;
+* ``plateau``: no relative improvement larger than ``rel_tol`` for ``patience`` epochs. Progress
+  is measured from the best loss at the last counted improvement, so slow steady gains add up:
+  a run whose loss falls by less than ``rel_tol`` per epoch but by more over the patience
+  window keeps training;
 * ``hopeless``: the run is behind the incumbent (the best run so far) *at equal effort*, i.e.
   its best loss after ``t`` epochs is worse than the incumbent's best after ``t`` epochs by more
   than ``hopeless_margin``, it is also worse than the incumbent's final loss by that margin,
@@ -113,6 +116,8 @@ class PlateauStopper:
         self.best = math.inf
         self.best_epoch = -1
         self.last_improvement = -1
+        # Best loss when the last improvement was counted: the anchor progress is measured from.
+        self.anchor = math.inf
         self.gaps: List[int] = []
         self.curve: List[float] = []
         self.stop_reason: Optional[str] = None
@@ -127,11 +132,12 @@ class PlateauStopper:
         if not math.isfinite(loss):
             self.stop_reason = "diverged"
             return True
-        threshold = self.best - self.rel_tol * abs(self.best) if math.isfinite(self.best) else math.inf
+        threshold = self.anchor - self.rel_tol * abs(self.anchor) if math.isfinite(self.anchor) else math.inf
         if loss < threshold:
             if self.last_improvement >= 0:
                 self.gaps.append(epoch - self.last_improvement)
             self.last_improvement = epoch
+            self.anchor = loss
         if loss < self.best:
             self.best = loss
             self.best_epoch = epoch

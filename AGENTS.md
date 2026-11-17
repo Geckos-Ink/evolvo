@@ -38,7 +38,9 @@ Quick guidance for AI assistants working in this repository.
   - `efficiency.py` - EfficiencyModel (frontier per half-octave, relative-error power-law fit,
     efficient_size, pressure).
   - `stopping.py` - PlateauStopper (plateau / hopeless at equal effort / diverged / hard cap; learned
-    patience from `gap` stats; records outcomes).
+    patience from `gap` stats; records outcomes). Plateau progress is measured from `anchor` (the
+    loss at the last counted `rel_tol` improvement), never from the latest best, so slow steady
+    descent is not cut off.
   - `search.py` - ArchitectureSearch (quantile rewards, learned mutation choice, repair after every
     edit, signature cache, window adaptation, converged/budget stops), Knowledge (save/load).
   - `build.py` - GenomeModule (traceable), build_module, parameter_count, trace_module.

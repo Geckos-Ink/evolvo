@@ -178,6 +178,16 @@ class EfficiencyAndStoppingTests(unittest.TestCase):
         self.assertLess(learned.patience, 25)
         self.assertEqual(PlateauStopper(max_epochs=3).max_epochs, 5)    # min_epochs floor
 
+    def test_slow_steady_progress_is_not_a_plateau(self):
+        # 0.02 % per epoch is below rel_tol each epoch but ~0.5 % per patience window.
+        stopper = PlateauStopper(max_epochs=2000)
+        epoch = 0
+        while not stopper.update(epoch, 1.0 - 2e-4 * min(epoch, 400)):
+            epoch += 1
+        self.assertEqual(stopper.stop_reason, "plateau")
+        self.assertGreater(stopper.best_epoch, 390)
+        self.assertGreater(epoch, 400)
+
     def test_hopeless_needs_equal_effort_deficit(self):
         reference = [1.0 / (1 + t) for t in range(200)]
         behind = PlateauStopper(incumbent=0.005, reference_curve=reference, max_epochs=200)
