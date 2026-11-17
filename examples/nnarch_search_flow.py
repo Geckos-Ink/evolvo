@@ -1,6 +1,6 @@
 """GFSL-NN architecture search on a small synthetic regression (needs PyTorch).
 
-    python examples/arch_search_flow.py [knowledge.json]
+    python examples/nnarch_search_flow.py [knowledge.json]
 
 Evolves torch architectures (MLP/residual/transformer macros and primitives), trains each with
 learned plateau stopping, and prints the best genome, the size/loss Pareto front and what the
@@ -14,8 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import torch  # noqa: E402
 
-from evolvo.arch import ArchSpace, ArchitectureSearch, Knowledge  # noqa: E402
-from evolvo.arch.train import TorchTask  # noqa: E402
+from evolvo.nnarch import ArchSpace, ArchitectureSearch, Knowledge  # noqa: E402
+from evolvo.nnarch.train import TorchTask  # noqa: E402
 
 
 def main() -> None:

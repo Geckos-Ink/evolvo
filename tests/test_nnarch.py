@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from evolvo.arch import (  # noqa: E402
+from evolvo.nnarch import (  # noqa: E402
     AdaptivePolicy, ArchGenome, ArchSpace, ArchitectureSearch, ArgSpec, Chooser, ContextualStats,
     EfficiencyModel, Knowledge, PlateauStopper, Row, default_registry, fit_power_law, log_bucket,
     register_macro,
@@ -90,7 +90,7 @@ class LanguageTests(unittest.TestCase):
         self.assertNotIn("add", ops)             # needs a second, matching value
         self.assertIn("tokenize", ops)
         heads = space.registry.get("attend").args[0]
-        from evolvo.arch import Shape
+        from evolvo.nnarch import Shape
         self.assertEqual(space.arg_options(heads, Shape("set", 12, "n6")), [1, 2, 4])
         tight = ArchSpace([("vec", 6)], 1, max_params=200)
         units = tight.feasible_args(tight.registry.get("linear"), (tight.inputs[0],), 0, {},
@@ -243,8 +243,8 @@ class SearchTests(unittest.TestCase):
 @unittest.skipIf(torch is None, "PyTorch not installed")
 class TorchTests(unittest.TestCase):
     def test_build_parity_trace_and_training(self):
-        from evolvo.arch.build import build_module, parameter_count, trace_module
-        from evolvo.arch.train import TorchTask
+        from evolvo.nnarch.build import build_module, parameter_count, trace_module
+        from evolvo.nnarch.train import TorchTask
 
         chooser = Chooser(random.Random(5))
         for inputs in ([("vec", 5)], [("set", 4), ("vec", 2)]):

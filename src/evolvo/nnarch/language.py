@@ -28,7 +28,7 @@ a sequence). Set values carry an ``origin`` naming their length, so element-wise
 only pair sets of the same length. The output head (an automatic mean pool for a ``set`` result,
 then a linear layer to the output width) is fixed, not genetic.
 
-Pure Python: shapes and parameter counts are computed without torch. ``evolvo.arch.build``
+Pure Python: shapes and parameter counts are computed without torch. ``evolvo.nnarch.build``
 lowers a genome to a ``torch.nn.Module``.
 """
 
@@ -886,7 +886,7 @@ class ArchSpace:
 class Chooser:
     """Slot-choice callback: ``chooser(slot, context, options) -> option``.
 
-    The default chooses uniformly with its own ``random.Random``; ``evolvo.arch.policy``
+    The default chooses uniformly with its own ``random.Random``; ``evolvo.nnarch.policy``
     provides the learned one.
     """
 

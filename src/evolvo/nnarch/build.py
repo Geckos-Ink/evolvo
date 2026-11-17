@@ -25,7 +25,7 @@ else:
 
 def _require_torch() -> None:
     if torch is None:
-        raise ModuleNotFoundError("evolvo.arch.build needs PyTorch (`pip install torch`)") from _IMPORT_ERROR
+        raise ModuleNotFoundError("evolvo.nnarch.build needs PyTorch (`pip install torch`)") from _IMPORT_ERROR
 
 
 def _activation(name: str):

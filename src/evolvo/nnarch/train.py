@@ -1,9 +1,9 @@
 """Training a genome's module with automatic epoch stopping (requires PyTorch).
 
 :func:`train_module` runs AdamW over (mini)batches, evaluates the validation loss every epoch,
-lets a :class:`~evolvo.arch.stopping.PlateauStopper` decide when to stop, and restores the
+lets a :class:`~evolvo.nnarch.stopping.PlateauStopper` decide when to stop, and restores the
 weights of the best validation epoch. :class:`TorchTask` adapts it to
-:class:`~evolvo.arch.search.ArchitectureSearch`: build, count, train, report, and keep the
+:class:`~evolvo.nnarch.search.ArchitectureSearch`: build, count, train, report, and keep the
 module of the best candidate so far.
 """
 

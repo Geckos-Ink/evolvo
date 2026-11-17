@@ -15,7 +15,7 @@ The project reimplements the **Genetic Fixed Structure Language (GFSL)** as desc
 - **Effective algorithm extraction** so execution only touches the instructions that matter.
 - **Targeted operation extraction** to pull only the dependencies for specific result references.
 - **Neural architecture support** via `RecursiveModelBuilder`, enabling GFSL to describe CNN/MLP topologies (requires PyTorch).
-- **GFSL-NN architecture search** (`evolvo.arch`): a fixed 7-slot genetic language for torch models (vector and set tensors, attention, residuals, feature tokens). It has macros with integer arguments (`mlp`, `resmlp`, `transformer`, `deepsets`, user macros), cascading validity, and slot weights learned during search. Group types are discovered, not enumerated. Each candidate stops training automatically at its plateau, and a learned loss-versus-size frontier steers architecture size. Spec: [`papers/GFSL-NN.md`](papers/GFSL-NN.md).
+- **GFSL-NN architecture search** (`evolvo.nnarch`): a fixed 7-slot genetic language for torch models (vector and set tensors, attention, residuals, feature tokens). It has macros with integer arguments (`mlp`, `resmlp`, `transformer`, `deepsets`, user macros), cascading validity, and slot weights learned during search. Group types are discovered, not enumerated. Each candidate stops training automatically at its plateau, and a learned loss-versus-size frontier steers architecture size. Spec: [`papers/GFSL-NN.md`](papers/GFSL-NN.md).
 - **Hybrid guidance**:
   - `GFSLQLearningGuide` learns slot choices with tabular Q-learning.
   - `GFSLSupervisedGuide` is a PyTorch model that predicts fitness and proposes smarter mutations (optional; skip if PyTorch is unavailable).
@@ -132,7 +132,7 @@ print(best.to_human_readable())
 ## Source Layout
 
 - `src/evolvo/` - modular package code (enums, slot utilities, validator, genome, executor, evolver, guidance models). Public names load lazily, so `import evolvo` does not import NumPy until a NumPy-backed class is used.
-- `src/evolvo/arch/` - GFSL-NN: `language` (rows, ops, macros, cascading validity, repair, lowering), `stats` (contextual statistics with discovered groups), `policy` (learned slot weights), `efficiency` (size frontier), `stopping` (learned plateau stopping), `search` (evolution + knowledge), `build`/`train` (PyTorch).
+- `src/evolvo/nnarch/` - GFSL-NN: `language` (rows, ops, macros, cascading validity, repair, lowering), `stats` (contextual statistics with discovered groups), `policy` (learned slot weights), `efficiency` (size frontier), `stopping` (learned plateau stopping), `search` (evolution + knowledge), `build`/`train` (PyTorch).
 - `tests/` - `python -m unittest discover -s tests` (the PyTorch cases skip without torch).
 - `example.py` and `examples/` - runnable scripts that bootstrap `src/` into `sys.path` for local runs.
 
@@ -148,7 +148,7 @@ Practical scripts live in `examples/`:
 - `examples/function_flow.py` — typed function declaration/call plus activity-based stale-instruction pruning.
 - `examples/nested_function_flow.py` — nested function behavior (`allow_nested_functions=True/False`) side-by-side.
 - `examples/void_external_write_flow.py` — void function behavior with isolated scope vs. external writes.
-- `examples/arch_search_flow.py [knowledge.json]` — GFSL-NN architecture search with learned stopping and size steering on a synthetic regression; reuses and updates a knowledge file.
+- `examples/nnarch_search_flow.py [knowledge.json]` — GFSL-NN architecture search with learned stopping and size steering on a synthetic regression; reuses and updates a knowledge file.
 
 ---
 
@@ -223,11 +223,11 @@ Use `kompute-sim` for fast compatibility/planning validation without native Vulk
 
 ## GFSL-NN: Evolving Torch Architectures
 
-`evolvo.arch` describes a model as fixed rows `[target, op, src_a, src_b, arg0, arg1, arg2]`. Each option is enumerated and checked against the shapes and the parameter budget, so every genome builds:
+`evolvo.nnarch` describes a model as fixed rows `[target, op, src_a, src_b, arg0, arg1, arg2]`. Each option is enumerated and checked against the shapes and the parameter budget, so every genome builds:
 
 ```python
-from evolvo.arch import ArchSpace, ArchitectureSearch, Knowledge
-from evolvo.arch.train import TorchTask
+from evolvo.nnarch import ArchSpace, ArchitectureSearch, Knowledge
+from evolvo.nnarch.train import TorchTask
 
 space = ArchSpace([("vec", 4)], 1, max_rows=5, max_params=30_000)
 task = TorchTask((x_train, y_train), (x_val, y_val), lr=5e-3)      # learned plateau stopping

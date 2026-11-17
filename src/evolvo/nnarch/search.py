@@ -1,15 +1,15 @@
 """Evolutionary architecture search over the GFSL-NN language.
 
-:class:`ArchitectureSearch` evolves :class:`~evolvo.arch.language.ArchGenome` populations.
+:class:`ArchitectureSearch` evolves :class:`~evolvo.nnarch.language.ArchGenome` populations.
 Each part learns while it runs:
 
-* **Slot choices** come from an :class:`~evolvo.arch.policy.AdaptivePolicy`. After every
+* **Slot choices** come from an :class:`~evolvo.nnarch.policy.AdaptivePolicy`. After every
   evaluation, each effective decision of the genome (op, source distance, width, depth, heads,
   activation, length) is credited with the genome's fitness quantile among all evaluations.
 * **Mutation operators** (argument step, row replacement, insertion, deletion, rewiring,
   crossover) are chosen by the same policy (slot ``mutation``), credited with the child's
   quantile, so the search learns which edits pay on this problem.
-* **Size** is steered by an :class:`~evolvo.arch.efficiency.EfficiencyModel`: its pressure
+* **Size** is steered by an :class:`~evolvo.nnarch.efficiency.EfficiencyModel`: its pressure
   tilts size arguments and argument steps up or down, and the selection score
   ``ln(loss) + size_cost * ln(params)`` prefers the smaller of two equally good models.
 * **The language** widens its width window towards sizes the elite uses at an edge.
@@ -105,7 +105,7 @@ Evaluate = Callable[[ArchSpace, ArchGenome, Mapping[str, Any]], Mapping[str, Any
 class ArchitectureSearch:
     """See the module docstring. ``evaluate(space, genome, info)`` returns at least ``loss``
     and ``params``; ``info`` carries ``seed``, ``incumbent`` (best loss so far) and
-    ``signature``. :class:`~evolvo.arch.train.TorchTask` is the PyTorch evaluator."""
+    ``signature``. :class:`~evolvo.nnarch.train.TorchTask` is the PyTorch evaluator."""
 
     def __init__(
         self,

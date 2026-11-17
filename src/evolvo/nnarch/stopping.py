@@ -16,7 +16,7 @@
 * ``max_epochs``: the hard cap (a budget guard, never the normal way a run ends).
 
 ``patience`` does not have to be set by hand. With a
-:class:`~evolvo.arch.stats.ContextualStats` store and a context (task signature, model size
+:class:`~evolvo.nnarch.stats.ContextualStats` store and a context (task signature, model size
 bucket, ...), the stopper reads the learned tendency of *epochs between improvements* for that
 kind of run and derives the patience from it; the learned *epoch of the best loss* delays the
 hopeless check for slow learners. It then records its own outcome so the next run in a similar

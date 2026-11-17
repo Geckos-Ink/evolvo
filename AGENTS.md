@@ -5,7 +5,7 @@ This file contains the directives for AIs, and has to be updated by AIs itself t
 Quick guidance for AI assistants working in this repository.
 
 ## Source of truth
-- `papers/GFSL-NN.md` defines the neural-architecture language in `src/evolvo/arch/`.
+- `papers/GFSL-NN.md` defines the neural-architecture language in `src/evolvo/nnarch/`.
 - `papers/GFSL-definition.md` defines the GFSL slot semantics and constraints.
 
 ## Repo layout (src-based)
@@ -26,7 +26,7 @@ Quick guidance for AI assistants working in this repository.
   - `qlearning.py` - GFSLQLearningGuide.
   - `supervised.py` - GFSLFeatureExtractor + GFSLSupervisedGuide.
   - `demos.py` - example_formula_discovery + example_neural_architecture_search.
-- `src/evolvo/arch/` - GFSL-NN (pure Python except `build.py`/`train.py`, which import torch):
+- `src/evolvo/nnarch/` - GFSL-NN (pure Python except `build.py`/`train.py`, which import torch):
   - `language.py` - Shape (vec/set + origin), OpSpec/OpRegistry (primitives + macros), ArgSpec domains
     (width ladder, depth, choice, divisor, space lists), ArchSpace (cascading options, budget masks,
     repair, validate, lower, signature, to_slots, decisions), Emitter (macro expansion), Chooser.

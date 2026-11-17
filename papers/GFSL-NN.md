@@ -1,6 +1,6 @@
 # GFSL-NN: fixed-structure genetic description of neural architectures
 
-**Status:** implemented in `src/evolvo/arch/` (draft 0.1, 17 November 2026).
+**Status:** implemented in `src/evolvo/nnarch/` (draft 0.1, 17 November 2026).
 **Parent specification:** [GFSL definition](GFSL-definition.md).
 **Purpose:** describe dynamically generated PyTorch models with a genome that is valid by
 construction, search it with weights learned while searching, and train each candidate only

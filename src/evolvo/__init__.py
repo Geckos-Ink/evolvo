@@ -1,7 +1,7 @@
 """GFSL-aligned Evolvo library.
 
 Public names are resolved lazily (PEP 562): ``from evolvo import GFSLGenome`` imports only the
-submodule that defines it. Pure-Python subpackages such as ``evolvo.arch`` therefore import
+submodule that defines it. Pure-Python subpackages such as ``evolvo.nnarch`` therefore import
 without NumPy, PyTorch or Kompute; the NumPy-backed GFSL runtime loads on first use.
 """
 
