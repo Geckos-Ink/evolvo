@@ -15,16 +15,19 @@ Quick guidance for AI assistants working in this repository.
   - `custom_ops.py` - CustomOperationManager, registry, registration helpers.
   - `values.py` - ValueEnumerations (context-aware VALUE enumerations).
   - `instruction.py` - GFSLInstruction, SlotOption, describe_slot_option.
-  - `validator.py` - SlotValidator (cascading validity + probability helpers).
+  - `validator.py` - SlotValidator (cascading validity + probability helpers, declared inputs) and
+    InstructionProfile (allowed target categories / operations; `formula()` preset).
   - `builder.py` - GFSLExpressionBuilder (slot-wise construction).
-  - `genome.py` - GFSLGenome, extraction helpers, human-readable decoding.
+  - `genome.py` - GFSLGenome (declared `input_counts`, `profile`), extraction helpers, human-readable decoding.
   - `weights.py` - OperationWeights (optional per-op and group metadata).
-  - `executor.py` - GFSLExecutor (runtime execution).
+  - `executor.py` - GFSLExecutor (runtime execution; `execute_batch` vectorized path with scalar fallback).
+  - `batch.py` - NumPy element-wise semantics of the built-in ops used by `execute_batch`.
   - `evaluator.py` - RealTimeEvaluator.
   - `model.py` - RecursiveModelBuilder.
-  - `evolver.py` - GFSLEvolver.
+  - `evolver.py` - GFSLEvolver (declared inputs/outputs/profile for every created genome, `fitness_epoch` hook, `invalidate_fitness`).
   - `qlearning.py` - GFSLQLearningGuide.
   - `supervised.py` - GFSLFeatureExtractor + GFSLSupervisedGuide.
+  - `policy_guide.py` - GFSLPolicyGuide (torch REINFORCE mutation policy, relative rewards, annealed exploration, save/load).
   - `demos.py` - example_formula_discovery + example_neural_architecture_search.
 - `src/evolvo/nnarch/` - GFSL-NN (pure Python except `build.py`/`train.py`, which import torch):
   - `language.py` - Shape (vec/set + origin), OpSpec/OpRegistry (primitives + macros), ArgSpec domains
@@ -44,7 +47,8 @@ Quick guidance for AI assistants working in this repository.
   - `search.py` - ArchitectureSearch (quantile rewards, learned mutation choice, repair after every
     edit, signature cache, window adaptation, converged/budget stops), Knowledge (save/load).
   - `build.py` - GenomeModule (traceable), build_module, parameter_count, trace_module.
-  - `train.py` - train_module (AdamW, best-epoch restore), TorchTask (shares the search's epoch stats).
+  - `train.py` - train_module (AdamW, best-epoch restore), TorchTask (shares the search's epoch stats;
+    `TorchTask.classification` = cross-entropy + long targets + validation `accuracy`).
 - `example.py` and `examples/` scripts auto-insert `src/` into `sys.path` for local runs.
 - `src/evolvo/__init__.py` resolves public names lazily (PEP 562 `__getattr__`); keep new exports in
   its `_LAZY` table so pure-Python subpackages import without NumPy.
@@ -74,6 +78,40 @@ Quick guidance for AI assistants working in this repository.
   - `GFSLExecutor.execute(...)` records executed instruction hits on `GFSLGenome.instruction_activity`.
   - Use `GFSLGenome.record_instruction_activity(...)`, `active_instruction_count(...)`,
     `stale_instruction_indices(...)`, and `prune_stale_instructions(...)` for usage-aware cleanup.
+
+## Inputs, profiles, batched execution, epochs, RL guide
+- Declared inputs: `GFSLGenome(inputs={DataType.DECIMAL: k})` (or `inputs=k`) seeds the validator's
+  `variable_counts` so `d$0..d$k-1` are readable before any assignment. The declaration lives in
+  `genome.input_counts` and is re-applied by `rebuild_validator_state`; `GFSLEvolver.crossover`
+  copies it. Without a declaration a fresh genome can only read variables it assigned first
+  (the README demos used to hand-edit `validator.variable_counts`, which every rebuild erased).
+- `GFSLEvolver.initialize_population(..., inputs=, outputs=, profile=)` stores them in
+  `genome_inputs` / `genome_outputs` / `genome_profile` and applies them to immigrants too
+  (immigrants previously had no outputs). Without `outputs`, immigrants copy the best genome's.
+- `InstructionProfile(target_categories, operations, allow_custom)`: the validator filters target
+  categories, the target types that have an allowed operation, and the operation slot. Keep it
+  on the genome (`genome.profile`); `rebuild_validator_state` passes it on. `formula()` =
+  VARIABLE targets + DECIMAL_OPS (+ boolean ops / CONSTANT targets on request) + custom ops.
+- `GFSLExecutor.execute_batch(genome, inputs, size=None, mode="auto"|"vector"|"scalar")`:
+  vector mode mirrors `_execute_instruction` element by element (see `batch.py` docstring for
+  the protected-numerics rules, e.g. POW overflow -> 0.0 like Python's OverflowError, and
+  GTE/LTE/NEQ assign nothing). `mode="auto"` uses the scalar loop when the main body has
+  `CALL`, list ops or list sources/targets, or when list inputs are given. Activity is recorded
+  once per batch. Kompute is not used by the batch path. `last_batch_mode` tells which ran.
+- Custom ops: `register_custom_operation(..., batch_function=f)`; `f` gets float64 arrays and
+  must match `function` element-wise; on exception the batch path loops over `function`.
+- `GFSLEvolver.evolve(..., fitness_epoch=callable)`: when the returned value changes,
+  `invalidate_fitness()` clears every fitness and the stagnation trackers, so the elite is
+  re-scored; evaluated genomes carry `genome.fitness_epoch`; `fitness_epoch_changes` logs
+  `(generation, epoch)`; `evaluations` counts evaluator calls.
+- `GFSLPolicyGuide`: same plug-in interface as `GFSLSupervisedGuide`. Traces of children are
+  keyed by `genome._policy_token`; `observe_population` rewards only children created since the
+  previous observation and then clears pending traces (copies of old children never double
+  count). Option scores use hashed `(slot, previous slot value, option)` buckets.
+- Pitfall (fixed): never alias the module-level op groups (`DECIMAL_OPS`, `TENSOR_OPS`, ...) in
+  the validator; `valid_ops = DECIMAL_OPS` followed by `.extend(...)` grew the global list on
+  every call, leaked list ops/CALL into every later decimal choice and made option generation
+  slower over a process lifetime. `test_global_operation_groups_are_not_mutated` guards it.
 
 ## Optional dependencies
 - `torch` (including `torch.nn`, `torch.nn.functional`, and `torch.optim`) is optional. The supervised guidance stack (`src/evolvo/supervised.py`), the neural model builder (`src/evolvo/model.py`), GPU-aware demos, and the provided example scripts now raise informative errors when PyTorch is missing so the rest of the library can be imported with only NumPy installed.
@@ -121,14 +159,20 @@ Quick guidance for AI assistants working in this repository.
 - Determinism: one `random.Random(seed)` per search; candidate *i* uses torch seed `seed*1_000_003+i`.
 
 ## Suggested verification
-- `PYTHONPATH=src python -m unittest discover -s tests` (GFSL-NN; torch cases self-skip).
-- Legacy GFSL has no automated suite; run:
+- `PYTHONPATH=src python -m unittest discover -s tests` — 33 tests with NumPy + torch:
+  `test_gfsl_core.py` (inputs, profiles, batch/scalar parity on random genomes and special
+  values, custom ops, fitness epochs, evolver smoke), `test_policy_guide.py` (reward, schedule,
+  bandit learning, save/load, evolver plug-in), `test_nnarch.py` (GFSL-NN incl. classification).
+  Without NumPy the core/policy modules skip; without torch the torch cases skip.
+- Legacy GFSL features (functions, lists, Kompute) have only smoke demos; run:
   - `python3 example.py function`
   - `python3 example.py nested`
   - `python3 example.py void`
   - `python3 examples/*.py`
 
 ## Roadmap / next steps
+- Native Kompute dispatch for `execute_batch`; batch support for CALL/list ops (currently scalar fallback).
+- Benchmark `GFSLPolicyGuide` vs `GFSLSupervisedGuide` vs no guide across seeds.
 - GFSL-NN: masked/padded set inputs; macro mining (promote recurring elite fragments to macros);
   FLOP/latency cost terms; multi-fidelity schedules beyond hopeless stopping; ONNX export.
 - Operation conversion table (map ops to alternatives per device profile using weights).

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import random
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import FrozenSet, Iterable, Any, Dict, List, Mapping, Optional, Tuple, Union
 
 from .custom_ops import custom_operations, infer_source_type
 from .enums import (
@@ -39,15 +40,91 @@ from .slots import (
 from .values import ValueEnumerations
 
 
+@dataclass(frozen=True)
+class InstructionProfile:
+    """Restricts the instruction language a validator offers (and so what random genomes,
+    mutations and repairs can produce).
+
+    ``target_categories``: allowed target categories (``None`` = all). ``operations``: allowed
+    built-in opcodes (``None`` = all). ``allow_custom``: whether registered custom operations
+    are offered. Variable/constant target types that would have no allowed operation are not
+    offered either, so random construction does not dead-end.
+    """
+
+    target_categories: Optional[FrozenSet[int]] = None
+    operations: Optional[FrozenSet[int]] = None
+    allow_custom: bool = True
+
+    @classmethod
+    def build(
+        cls,
+        target_categories: Optional[Iterable[Union[Category, int]]] = None,
+        operations: Optional[Iterable[Union[Operation, int]]] = None,
+        allow_custom: bool = True,
+    ) -> "InstructionProfile":
+        return cls(
+            None if target_categories is None else frozenset(int(c) for c in target_categories),
+            None if operations is None else frozenset(int(o) for o in operations),
+            bool(allow_custom),
+        )
+
+    @classmethod
+    def formula(
+        cls, *, boolean: bool = False, constants: bool = False, allow_custom: bool = True
+    ) -> "InstructionProfile":
+        """Straight-line arithmetic: variable targets, decimal ops (optionally boolean
+        compare/logic ops and constant targets), plus custom ops. Genomes built from it run on
+        the vectorized ``execute_batch`` path."""
+        cats = [Category.VARIABLE] + ([Category.CONSTANT] if constants else [])
+        ops = list(DECIMAL_OPS) + (list(BOOLEAN_COMPARE_OPS) + list(BOOLEAN_LOGIC_OPS) if boolean else [])
+        return cls.build(cats, ops, allow_custom)
+
+    def allows_target(self, category: int) -> bool:
+        return self.target_categories is None or int(category) in self.target_categories
+
+    def allows_operation(self, code: int) -> bool:
+        if custom_operations.get(code) is not None:
+            return self.allow_custom
+        return self.operations is None or int(code) in self.operations
+
+    def type_has_operations(self, dtype: DataType) -> bool:
+        groups = {
+            DataType.DECIMAL: DECIMAL_OPS,
+            DataType.BOOLEAN: list(BOOLEAN_COMPARE_OPS) + list(BOOLEAN_LOGIC_OPS),
+            DataType.TENSOR: TENSOR_OPS,
+        }
+        if any(self.allows_operation(int(op)) for op in groups.get(DataType(dtype), [])):
+            return True
+        return self.allow_custom and bool(custom_operations.codes_for_target(dtype))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "target_categories": None if self.target_categories is None else sorted(self.target_categories),
+            "operations": None if self.operations is None else sorted(self.operations),
+            "allow_custom": self.allow_custom,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "InstructionProfile":
+        return cls.build(data.get("target_categories"), data.get("operations"), data.get("allow_custom", True))
+
+
 class SlotValidator:
     """
     Enforces cascading validity - each slot's valid options
     depend entirely on all previous slots.
     """
 
-    def __init__(self, slot_count: int = DEFAULT_SLOT_COUNT):
+    def __init__(
+        self,
+        slot_count: int = DEFAULT_SLOT_COUNT,
+        input_counts: Optional[Mapping[Union[DataType, int], int]] = None,
+        profile: Optional[InstructionProfile] = None,
+    ):
         self.slot_count = int(slot_count)
+        self.profile = profile
         self.active_types = {DataType.DECIMAL}  # Start with decimal only
+        self.input_counts: Dict[int, int] = {}
         self.variable_counts = defaultdict(int)
         self.constant_counts = defaultdict(int)
         self.list_counts = defaultdict(int)
@@ -56,6 +133,26 @@ class SlotValidator:
         self.scope_depth = 0
         self.scope_stack: List[Tuple[str, Optional[DataType]]] = []
         self.config_state = {}
+        if input_counts:
+            self.declare_inputs(input_counts)
+
+    def declare_inputs(self, input_counts: Mapping[Union[DataType, int], int]) -> None:
+        """Expose caller-provided input variables (``d$0..d$k-1`` per type) as readable sources.
+
+        Declared inputs count as existing variables, so slot options can read them before any
+        instruction assigns them. Counts only grow; a declared type is activated.
+        """
+        for dtype, count in input_counts.items():
+            key = int(DataType(dtype))
+            count = int(count)
+            if count < 0:
+                raise ValueError(f"input count for {DataType(key).name} must be >= 0, got {count}")
+            if count == 0 or key == int(DataType.NONE):
+                continue
+            self.input_counts[key] = max(self.input_counts.get(key, 0), count)
+            if self.variable_counts[key] < count:
+                self.variable_counts[key] = count
+            self.activate_type(DataType(key))
 
     def activate_type(self, dtype: DataType):
         """Progressively activate new types."""
@@ -64,6 +161,11 @@ class SlotValidator:
             self.active_types.add(DataType.BOOLEAN)
         elif dtype == DataType.TENSOR:
             self.active_types.add(DataType.TENSOR)
+
+    def _profile_types(self, types: List[DataType]) -> List[DataType]:
+        if self.profile is None:
+            return list(types)
+        return [t for t in types if self.profile.type_has_operations(t)]
 
     def _coerce_config_property(self, value: int) -> Optional[ConfigProperty]:
         try:
@@ -197,24 +299,27 @@ class SlotValidator:
             return []
 
         if slot_index == SLOT_TARGET_CAT:
-            return [
+            cats = [
                 Category.NONE,
                 Category.VARIABLE,
                 Category.CONSTANT,
                 Category.LIST,
                 Category.FUNCTION,
             ]
+            if self.profile is not None:
+                cats = [c for c in cats if self.profile.allows_target(c)]
+            return cats
 
         if slot_index == SLOT_TARGET_SPEC:
             target_cat = instruction.slot_value(SLOT_TARGET_CAT)
             if target_cat == Category.NONE:
                 return [0]
             if target_cat == Category.VARIABLE:
-                return self._alloc_specifiers(Category.VARIABLE, sorted(self.active_types))
+                return self._alloc_specifiers(Category.VARIABLE, self._profile_types(sorted(self.active_types)))
             if target_cat == Category.CONSTANT:
                 return self._alloc_specifiers(
                     Category.CONSTANT,
-                    [DataType.BOOLEAN, DataType.DECIMAL],
+                    self._profile_types([DataType.BOOLEAN, DataType.DECIMAL]),
                 )
             if target_cat == Category.LIST:
                 return self._alloc_specifiers(Category.LIST, sorted(self.active_types))
@@ -266,13 +371,13 @@ class SlotValidator:
                 if self._has_lists():
                     valid_ops.append(Operation.LISTHASITEMS)
             elif target_type == DataType.DECIMAL:
-                valid_ops = DECIMAL_OPS
+                valid_ops = list(DECIMAL_OPS)  # copy: the branches below extend it
                 if self._has_lists(dtype_enum):
                     valid_ops.extend(LIST_VALUE_OPS)
                 if self._has_lists():
                     valid_ops.append(Operation.LISTCOUNT)
             elif target_type == DataType.TENSOR:
-                valid_ops = TENSOR_OPS
+                valid_ops = list(TENSOR_OPS)
                 if self._has_lists(dtype_enum):
                     valid_ops.extend(LIST_VALUE_OPS)
 
@@ -285,6 +390,8 @@ class SlotValidator:
 
             result_ops = [int(op) for op in valid_ops]
             result_ops.extend(custom_codes)
+            if self.profile is not None:
+                result_ops = [code for code in result_ops if self.profile.allows_operation(code)]
             return result_ops
 
         if slot_index == SLOT_SOURCE1_CAT:
@@ -650,4 +757,4 @@ class SlotValidator:
                 self.config_state[prop_value] = enum[value_idx]
 
 
-__all__ = ["SlotValidator"]
+__all__ = ["InstructionProfile", "SlotValidator"]

@@ -89,7 +89,8 @@ def train_module(
 
 
 class TorchTask:
-    """Evaluate genomes as regressors: build, train with learned stopping, score on validation.
+    """Evaluate genomes as regressors (default) or classifiers: build, train with learned
+    stopping, score on validation. Use :meth:`classification` for class targets.
 
     ``epoch_stats`` holds the learned stopping tendencies, keyed by the task signature and the
     candidate's size bucket, so the patience and epoch cap of each new candidate come from how
@@ -123,6 +124,7 @@ class TorchTask:
         self.hopeless_margin = hopeless_margin
         self.epoch_stats = epoch_stats or ContextualStats(pinned=("metric",))
         self.loss_fn = loss_fn
+        self.kind = "regression"
         self.best_loss = math.inf
         self.best_module = None
         self.best_signature: Optional[str] = None
@@ -130,6 +132,26 @@ class TorchTask:
         # The module of the most recent evaluation, so a wrapper can keep candidates that
         # satisfy its own constraint (e.g. an exportable form) besides the lowest-loss one.
         self.last_module = None
+
+    @classmethod
+    def classification(cls, train: Tuple[Any, Any], val: Tuple[Any, Any], **kwargs: Any) -> "TorchTask":
+        """A task for class targets: cross-entropy on the raw logits of the fixed linear head.
+
+        Targets are converted to a 1-D ``long`` tensor of class indices ``0..C-1``; build the
+        ``ArchSpace`` with ``outputs=C`` and ``task={"loss": "ce"}`` so the learned stopping
+        statistics are not shared with regression tasks. Each result also reports
+        ``accuracy`` on the validation split.
+        """
+        _require_torch()
+
+        def _targets(y):
+            y = torch.as_tensor(y)
+            return y.reshape(-1).long()
+
+        kwargs.setdefault("loss_fn", torch.nn.functional.cross_entropy)
+        task = cls((train[0], _targets(train[1])), (val[0], _targets(val[1])), **kwargs)
+        task.kind = "classification"
+        return task
 
     def __call__(self, space: ArchSpace, genome: ArchGenome, info: Mapping[str, Any]) -> Dict[str, Any]:
         module = build_module(space, genome, seed=info.get("seed", 0))
@@ -150,6 +172,10 @@ class TorchTask:
             stopper.record()
         result["params"] = params
         result["loss"] = result.pop("val_loss")
+        if self.kind == "classification":
+            with torch.no_grad():
+                logits = module(*_as_tuple(self.val[0]))
+                result["accuracy"] = float((logits.argmax(dim=-1) == self.val[1]).float().mean())
         self.last_module = module
         if math.isfinite(result["loss"]) and result["loss"] < self.best_loss:
             self.best_loss = result["loss"]

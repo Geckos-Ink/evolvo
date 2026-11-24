@@ -156,10 +156,10 @@ def main():
     )
 
     evolver = GFSLEvolver(population_size=32, supervised_guide=guide)
-    evolver.initialize_population("algorithm", initial_instructions=12)
-
-    for genome in evolver.population:
-        genome.mark_output(DataType.DECIMAL, 1)
+    # d$0 is the input x, d$1 the output: declare both so every genome (and every
+    # later immigrant) can read x and writes y.
+    evolver.initialize_population("algorithm", initial_instructions=12,
+                                  inputs=1, outputs=[(DataType.DECIMAL, 1)])
 
     def fitness(genome):
         return evaluator.evaluate(genome)

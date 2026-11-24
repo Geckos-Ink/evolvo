@@ -49,10 +49,10 @@ def example_formula_discovery():
         return evaluator_obj.evaluate(genome)
 
     evolver = GFSLEvolver(population_size=30)
-    evolver.initialize_population("algorithm", initial_instructions=15)
-
-    for genome in evolver.population:
-        genome.mark_output(DataType.DECIMAL, 1)
+    # d$0 is the input x, d$1 the output: declare both so every genome (and every
+    # later immigrant) can read x and writes y.
+    evolver.initialize_population("algorithm", initial_instructions=15,
+                                  inputs=1, outputs=[(DataType.DECIMAL, 1)])
 
     def progress_callback(gen, best_genome, best_fitness):
         if gen % 20 == 0:

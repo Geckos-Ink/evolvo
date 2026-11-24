@@ -6,10 +6,11 @@ from collections import defaultdict
 from dataclasses import dataclass
 import threading
 import warnings
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 import numpy as np
 
+from .batch import SCALAR_ONLY_OPS, apply_builtin, as_float, truthy
 from .custom_ops import custom_operations
 from .enums import Category, ConfigProperty, DataType, Operation
 from .genome import GFSLGenome
@@ -326,29 +327,10 @@ class GFSLExecutor:
 
         if inputs:
             for key, value in inputs.items():
-                dtype_char = key[0].lower()
-                if "!#" in key:
-                    cat = Category.LIST_CONSTANT
-                    idx_str = key.split("!#", 1)[1]
-                elif "!" in key:
-                    cat = Category.LIST
-                    idx_str = key.split("!", 1)[1]
-                elif "$" in key:
-                    cat = Category.VARIABLE
-                    idx_str = key.split("$", 1)[1]
-                elif "#" in key:
-                    cat = Category.CONSTANT
-                    idx_str = key.split("#", 1)[1]
-                else:
+                parsed = self._parse_input_key(key)
+                if parsed is None:
                     continue
-                idx = int(idx_str)
-
-                dtype = {
-                    "b": DataType.BOOLEAN,
-                    "d": DataType.DECIMAL,
-                    "t": DataType.TENSOR,
-                    "n": DataType.NONE,
-                }.get(dtype_char, DataType.DECIMAL)
+                cat, dtype, idx = parsed
 
                 if cat == Category.CONSTANT:
                     self.constants[dtype][idx] = value
@@ -388,6 +370,261 @@ class GFSLExecutor:
                 outputs[key] = None if self._is_void(value) else value
 
         return outputs
+
+    @staticmethod
+    def _parse_input_key(key: str) -> Optional[Tuple[Category, DataType, int]]:
+        """``'d$0'`` -> ``(VARIABLE, DECIMAL, 0)``; ``'d!1'``, ``'d!#0'``, ``'b#2'`` likewise."""
+        dtype_char = key[0].lower()
+        if "!#" in key:
+            cat = Category.LIST_CONSTANT
+            idx_str = key.split("!#", 1)[1]
+        elif "!" in key:
+            cat = Category.LIST
+            idx_str = key.split("!", 1)[1]
+        elif "$" in key:
+            cat = Category.VARIABLE
+            idx_str = key.split("$", 1)[1]
+        elif "#" in key:
+            cat = Category.CONSTANT
+            idx_str = key.split("#", 1)[1]
+        else:
+            return None
+        dtype = {
+            "b": DataType.BOOLEAN,
+            "d": DataType.DECIMAL,
+            "t": DataType.TENSOR,
+            "n": DataType.NONE,
+        }.get(dtype_char, DataType.DECIMAL)
+        return cat, dtype, int(idx_str)
+
+    # ------------------------------------------------------------------ batched execution
+
+    def batch_mode(self, genome: GFSLGenome, inputs: Optional[Mapping[str, Any]] = None) -> str:
+        """``'vector'`` when ``execute_batch`` can run the genome with NumPy, else ``'scalar'``."""
+        if inputs and any("!" in key for key in inputs):
+            return "scalar"
+        self._index_functions(genome)
+        for idx in self._main_execution_indices(genome.extract_effective_algorithm()):
+            if idx < len(genome.instructions):
+                instr = genome.instructions[idx]
+                if custom_operations.get(instr.operation):
+                    continue
+                if instr.operation in SCALAR_ONLY_OPS:
+                    return "scalar"
+                if instr.source1_cat in (Category.LIST, Category.LIST_CONSTANT) or instr.source2_cat in (
+                    Category.LIST,
+                    Category.LIST_CONSTANT,
+                ):
+                    return "scalar"
+                if instr.target_cat in (Category.LIST, Category.LIST_CONSTANT):
+                    return "scalar"
+        return "vector"
+
+    def execute_batch(
+        self,
+        genome: GFSLGenome,
+        inputs: Optional[Mapping[str, Any]] = None,
+        *,
+        size: Optional[int] = None,
+        mode: str = "auto",
+        track_activity: Optional[bool] = None,
+        activity_tick: Optional[int] = None,
+    ) -> Dict[str, np.ndarray]:
+        """Execute ``genome`` on many input rows at once and return one array per output.
+
+        Args:
+            genome: the genome to run.
+            inputs: ``{"d$0": array_or_scalar, ...}``; 1-D arrays of one common length ``n``,
+                scalars broadcast to every row. List inputs (``"d!0"``) are either one list
+                shared by all rows or a length-``n`` sequence of per-row lists; they force the
+                scalar mode.
+            size: number of rows when no input is an array (default 1).
+            mode: ``"auto"`` (NumPy unless the genome uses CALL or list operations in its main
+                body), ``"vector"`` (NumPy, error if unsupported) or ``"scalar"`` (row-by-row
+                ``execute`` calls; the reference semantics).
+            track_activity / activity_tick: as ``execute``, but recorded once per batch.
+
+        Returns:
+            ``{"d$k": float64 array, "b$k": bool array, ...}`` for the declared outputs. Row ``i``
+            equals ``execute(genome, row_i)`` (decimal: ``float`` of the scalar result, ``NaN``
+            for a void result; boolean: its truthiness). The batch path always runs on CPU.
+        """
+        inputs = dict(inputs or {})
+        n = self._batch_size(inputs, size)
+        chosen = self.batch_mode(genome, inputs) if mode == "auto" else mode
+        if chosen not in ("vector", "scalar"):
+            raise ValueError(f"mode must be 'auto', 'vector' or 'scalar', got {mode!r}")
+        if chosen == "vector" and mode == "vector" and self.batch_mode(genome, inputs) != "vector":
+            raise ValueError("genome uses CALL or list operations; use mode='auto' or 'scalar'")
+        self.last_batch_mode = chosen
+        should_track = self.track_instruction_activity if track_activity is None else bool(track_activity)
+        if chosen == "scalar":
+            return self._execute_batch_scalar(genome, inputs, n, should_track, activity_tick)
+        return self._execute_batch_vector(genome, inputs, n, should_track, activity_tick)
+
+    @staticmethod
+    def _batch_size(inputs: Mapping[str, Any], size: Optional[int]) -> int:
+        n: Optional[int] = None
+        for key, value in inputs.items():
+            if "!" in key:
+                continue
+            arr = np.asarray(value)
+            if arr.ndim == 0:
+                continue
+            if arr.ndim != 1:
+                raise ValueError(f"input {key!r} must be a scalar or 1-D array, got shape {arr.shape}")
+            if n is None:
+                n = int(arr.shape[0])
+            elif int(arr.shape[0]) != n:
+                raise ValueError(f"input {key!r} has length {arr.shape[0]}, expected {n}")
+        if n is None:
+            n = int(size) if size is not None else 1
+        elif size is not None and int(size) != n:
+            raise ValueError(f"size={size} does not match input length {n}")
+        return n
+
+    def _batch_outputs(self, genome: GFSLGenome, values: Dict[str, List[Any]], n: int) -> Dict[str, np.ndarray]:
+        out: Dict[str, np.ndarray] = {}
+        for cat, dtype, idx in genome.outputs:
+            sym = "$" if cat == Category.VARIABLE else "#"
+            key = f"{DataType(dtype).name[0].lower()}{sym}{idx}"
+            raw = values.get(key)
+            if raw is None:
+                raw = [0.0] * n
+            if int(dtype) == int(DataType.BOOLEAN):
+                out[key] = np.array([bool(v) if v is not None else False for v in raw], dtype=bool)
+            else:
+                out[key] = np.array(
+                    [np.nan if v is None else self._safe_float(v) for v in raw], dtype=np.float64
+                )
+        return out
+
+    def _execute_batch_scalar(self, genome, inputs, n, should_track, activity_tick):
+        arrays = {k: np.asarray(v) for k, v in inputs.items() if "!" not in k}
+        lists = {k: v for k, v in inputs.items() if "!" in k}
+        collected: Dict[str, List[Any]] = defaultdict(list)
+        executed: Set[int] = set()
+        for i in range(n):
+            row: Dict[str, Any] = {}
+            for key, arr in arrays.items():
+                row[key] = arr.item() if arr.ndim == 0 else arr[i].item()
+            for key, value in lists.items():
+                row[key] = value[i] if isinstance(value, (list, tuple)) and len(value) == n and isinstance(value[0], (list, tuple, np.ndarray)) else value
+            result = self.execute(genome, row, track_activity=False)
+            executed |= self._executed_instruction_indices
+            for key, value in result.items():
+                collected[key].append(value)
+        if should_track and executed:
+            genome.record_instruction_activity(sorted(executed), tick=activity_tick)
+        return self._batch_outputs(genome, collected, n)
+
+    def _execute_batch_vector(self, genome, inputs, n, should_track, activity_tick):
+        self.reset()
+        store: Dict[Tuple[int, int, int], Any] = {}
+        for key, value in inputs.items():
+            parsed = self._parse_input_key(key)
+            if parsed is None:
+                continue
+            cat, dtype, idx = parsed
+            if cat in (Category.VARIABLE, Category.CONSTANT):
+                arr = np.asarray(value)
+                store[(int(cat), int(dtype), idx)] = arr if arr.ndim == 1 else np.full(n, arr.item(), dtype=arr.dtype if arr.dtype.kind in "biuf" else object)
+
+        def read(instr: GFSLInstruction, source_num: int) -> Any:
+            cat = instr.source1_cat if source_num == 1 else instr.source2_cat
+            if cat == Category.NONE:
+                return None
+            if cat in (Category.VARIABLE, Category.CONSTANT):
+                dtype = instr.source1_type if source_num == 1 else instr.source2_type
+                val = instr.source1_value if source_num == 1 else instr.source2_value
+                if cat == Category.CONSTANT and dtype == DataType.NONE:
+                    return None
+                return store.get((int(cat), int(dtype), int(val)), 0.0)
+            return self._get_value(instr, source_num)  # VALUE / CONFIG / FUNCTION: row-independent
+
+        executed: Set[int] = set()
+        self._index_functions(genome)
+        for idx in self._main_execution_indices(genome.extract_effective_algorithm()):
+            if idx >= len(genome.instructions):
+                continue
+            instr = genome.instructions[idx]
+            op_code = instr.operation
+            s1, s2 = read(instr, 1), read(instr, 2)
+            custom_op = custom_operations.get(op_code)
+            result: Any = None
+            if custom_op:
+                result = self._batch_custom(custom_op, instr, s1, s2, n)
+            else:
+                try:
+                    op = Operation(op_code)
+                except ValueError:
+                    continue
+                if op == Operation.FUNC:
+                    continue
+                if op == Operation.SET:
+                    if instr.source1_cat == Category.CONFIG:
+                        self.config_state[instr.source1_value] = s2
+                else:
+                    result = apply_builtin(op, s1, s2, n)
+            if result is not None and instr.target_cat in (Category.VARIABLE, Category.CONSTANT):
+                store[(int(instr.target_cat), int(instr.target_type), int(instr.target_index))] = result
+            executed.add(int(idx))
+        self._executed_instruction_indices = executed
+        if should_track and executed:
+            genome.record_instruction_activity(sorted(executed), tick=activity_tick)
+
+        values: Dict[str, List[Any]] = {}
+        for cat, dtype, idx in genome.outputs:
+            sym = "$" if cat == Category.VARIABLE else "#"
+            key = f"{DataType(dtype).name[0].lower()}{sym}{idx}"
+            v = store.get((int(cat), int(dtype), int(idx)), 0.0)
+            if int(dtype) == int(DataType.BOOLEAN):
+                values[key] = truthy(v, n)
+            else:
+                values[key] = as_float(v, n)
+        out: Dict[str, np.ndarray] = {}
+        for key, arr in values.items():
+            out[key] = np.array(arr, dtype=bool if key.startswith("b") else np.float64, copy=True)
+        return out
+
+    def _batch_custom(self, custom_op, instr: GFSLInstruction, s1: Any, s2: Any, n: int) -> Any:
+        a = as_float(s1, n)
+        b = as_float(s2, n)
+        context = {"executor": self, "instruction": instr}
+        batch_fn = getattr(custom_op, "batch_function", None)
+        if batch_fn is not None:
+            args = [a] if custom_op.arity < 2 else [a, b]
+            try:
+                with np.errstate(all="ignore"):
+                    if custom_op.accepts_batch_context:
+                        res = batch_fn(*args, context=context)
+                    else:
+                        res = batch_fn(*args)
+                res = np.asarray(res)
+                if res.ndim == 0:
+                    res = np.full(n, res.item())
+                if res.shape == (n,):
+                    return as_float(res, n) if custom_op.target_type == DataType.DECIMAL else res
+            except Exception:
+                pass  # fall back to the scalar function, element by element
+        results: List[Any] = []
+        for i in range(n):
+            args = [float(a[i])]
+            if custom_op.arity >= 2:
+                args.append(float(b[i]))
+            try:
+                if custom_op.accepts_context:
+                    r = custom_op.function(*args, context=context)
+                else:
+                    r = custom_op.function(*args)
+                if custom_op.target_type == DataType.DECIMAL:
+                    r = self._safe_float(r)
+            except Exception:
+                r = 0.0
+            results.append(r)
+        if custom_op.target_type == DataType.DECIMAL:
+            return np.asarray(results, dtype=np.float64)
+        return np.asarray(results)
 
     def _warn_kompute_fallback_once(self, key: str, message: str) -> None:
         if not self.kompute_warn_on_fallback:

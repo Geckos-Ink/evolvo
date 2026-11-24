@@ -270,6 +270,25 @@ class TorchTests(unittest.TestCase):
         self.assertGreater(search.knowledge.epochs.count, 0)
         self.assertIn(report["best"]["training"]["stop_reason"], ("plateau", "max_epochs"))
 
+    def test_classification_task(self):
+        """E4: vector input, class targets, cross-entropy on the head's logits, accuracy reported."""
+        from evolvo.nnarch.train import TorchTask
+
+        torch.manual_seed(1)
+        x = torch.rand(600, 2) * 2 - 1
+        angle = torch.atan2(x[:, 1], x[:, 0])
+        y = ((angle + math.pi) / (2 * math.pi) * 3).long().clamp(max=2)  # 3 angular sectors
+        task = TorchTask.classification((x[:400], y[:400]), (x[400:], y[400:].float()), lr=1e-2, hard_max_epochs=150)
+        self.assertEqual(task.val[1].dtype, torch.long)
+        space = ArchSpace([("vec", 2)], 3, max_rows=3, max_params=5000, task={"loss": "ce"})
+        search = ArchitectureSearch(space, task, seed=0, population=4)
+        report = search.run(generations=2, patience=5)
+        best = report["best"]
+        self.assertLess(best["loss"], math.log(3))  # better than uniform guessing
+        acc = float((task.best_module(x[400:]).argmax(-1) == y[400:]).float().mean())
+        self.assertGreater(acc, 0.7)
+        self.assertEqual(space.task["loss"], "ce")
+
 
 if __name__ == "__main__":
     unittest.main()

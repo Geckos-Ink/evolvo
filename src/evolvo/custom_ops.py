@@ -36,6 +36,12 @@ class CustomOperation:
     value_enumeration: Optional[Tuple[float, ...]]
     doc: str = ""
     accepts_context: bool = False
+    # Optional vectorized twin of ``function`` used by ``GFSLExecutor.execute_batch``: it gets
+    # float64 arrays (one per source, ``arity`` of them) and returns an array of the same length
+    # (or a scalar). It must agree with ``function`` element by element; on any exception the
+    # batch path calls ``function`` row by row instead.
+    batch_function: Optional[Callable[..., Any]] = None
+    accepts_batch_context: bool = False
 
 
 class CustomOperationManager:
@@ -64,6 +70,7 @@ class CustomOperationManager:
         value_enumeration: Optional[Union[List[float], Tuple[float, ...]]] = None,
         code: Optional[int] = None,
         doc: str = "",
+        batch_function: Optional[Callable[..., Any]] = None,
     ) -> int:
         """Register a new custom operation and return its opcode."""
         if arity not in (1, 2):
@@ -157,6 +164,15 @@ class CustomOperationManager:
         if value_enumeration is not None:
             value_enum_tuple = tuple(float(v) for v in value_enumeration)
 
+        accepts_batch_context = False
+        if batch_function is not None:
+            if not callable(batch_function):
+                raise ValueError("batch_function must be callable")
+            try:
+                accepts_batch_context = "context" in inspect.signature(batch_function).parameters
+            except (TypeError, ValueError):
+                accepts_batch_context = False
+
         op = CustomOperation(
             code=code,
             name=clean_name,
@@ -168,6 +184,8 @@ class CustomOperationManager:
             value_enumeration=value_enum_tuple,
             doc=doc,
             accepts_context=accepts_context,
+            batch_function=batch_function,
+            accepts_batch_context=accepts_batch_context,
         )
 
         self._ops_by_code[code] = op
@@ -262,6 +280,7 @@ def register_custom_operation(
     value_enumeration: Optional[Union[List[float], Tuple[float, ...]]] = None,
     code: Optional[int] = None,
     doc: str = "",
+    batch_function: Optional[Callable[..., Any]] = None,
 ) -> int:
     """
     Public helper for registering ad-hoc operations.
@@ -269,6 +288,10 @@ def register_custom_operation(
     The callable should accept one or two positional arguments (matching ``arity``)
     and may optionally include a ``context`` keyword-only parameter that will receive
     a dictionary with the current executor and instruction.
+
+    ``batch_function`` (optional) is the vectorized twin used by
+    ``GFSLExecutor.execute_batch``: it receives float64 arrays and must match ``function``
+    element by element. Without it, batched execution calls ``function`` once per row.
     """
     return custom_operations.register(
         name,
@@ -280,6 +303,7 @@ def register_custom_operation(
         value_enumeration=value_enumeration,
         code=code,
         doc=doc,
+        batch_function=batch_function,
     )
 
 

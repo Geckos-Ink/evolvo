@@ -5,9 +5,11 @@ from __future__ import annotations
 import copy
 import hashlib
 import random
-from typing import Callable, List, Optional, Sequence, Set, TYPE_CHECKING
+from typing import Callable, Dict, Hashable, List, Mapping, Optional, Sequence, Set, Tuple, TYPE_CHECKING, Union
 
+from .enums import DataType
 from .genome import GFSLGenome
+from .validator import InstructionProfile
 from .instruction import GFSLInstruction
 from .slots import SLOT_OPERATION
 
@@ -128,8 +130,13 @@ def _make_random_genome(
     *,
     genome_type: str,
     slot_count: Optional[int] = None,
+    inputs: Optional[Mapping[int, int]] = None,
+    outputs: Optional[Sequence[Tuple[int, int, int]]] = None,
+    profile: Optional[InstructionProfile] = None,
 ) -> GFSLGenome:
-    genome = GFSLGenome(genome_type, slot_count=slot_count)
+    genome = GFSLGenome(genome_type, slot_count=slot_count, inputs=inputs or None, profile=profile)
+    if outputs:
+        genome.outputs = list(outputs)
     for _ in range(random.randint(1, max(1, int(initial_instructions)))):
         if _append_random_instruction_fast(genome, max_attempts=6):
             continue
@@ -183,6 +190,17 @@ class GFSLEvolver:
             4,
             min(self.max_instruction_count, int(max_effective_instruction_count)),
         )
+
+        # Declared inputs/outputs applied to every genome the evolver creates (initial population,
+        # crossover children, immigrants). Set by ``initialize_population``.
+        self.genome_inputs: Dict[int, int] = {}
+        self.genome_outputs: Optional[List[Tuple[int, int, int]]] = None
+        self.genome_profile: Optional[InstructionProfile] = None
+        # Evaluation-size epochs (``evolve(fitness_epoch=...)``): fitness values are only compared
+        # within one epoch.
+        self.fitness_epoch: Optional[Hashable] = None
+        self.fitness_epoch_changes: List[Tuple[int, Hashable]] = []
+        self.evaluations = 0
 
         self.best_fitness_tracker = -float("inf")
         self.stagnation_count = 0
@@ -267,8 +285,49 @@ class GFSLEvolver:
         ]
         genome.rebuild_validator_state()
 
-    def initialize_population(self, genome_type: str = "algorithm", initial_instructions: int = 10):
-        """Create initial random population with strict diversity fallbacks."""
+    def _resolved_outputs(self) -> Optional[List[Tuple[int, int, int]]]:
+        if self.genome_outputs is not None:
+            return list(self.genome_outputs)
+        if self.population and self.population[0].outputs:
+            return list(self.population[0].outputs)
+        return None
+
+    def _random_genome(self, initial_instructions: int, genome_type: str) -> GFSLGenome:
+        return _make_random_genome(
+            initial_instructions,
+            genome_type=genome_type,
+            inputs=self.genome_inputs or None,
+            outputs=self._resolved_outputs(),
+            profile=self.genome_profile,
+        )
+
+    def initialize_population(
+        self,
+        genome_type: str = "algorithm",
+        initial_instructions: int = 10,
+        *,
+        inputs: Optional[Union[int, Mapping[Union[DataType, int], int]]] = None,
+        outputs: Optional[Sequence[Tuple[Union[DataType, int], int]]] = None,
+        profile: Optional[InstructionProfile] = None,
+    ):
+        """Create initial random population with strict diversity fallbacks.
+
+        Args:
+            inputs: declared input variables (see ``GFSLGenome``), e.g. ``{DataType.DECIMAL: 5}``
+                or ``5``. Without it, random genomes can only read variables they assign first.
+            outputs: ``[(DataType.DECIMAL, k), ...]`` marked on every genome the evolver
+                creates, including later immigrants. Without it, immigrants copy the outputs
+                of the current best genome.
+            profile: optional ``InstructionProfile`` (e.g. ``InstructionProfile.formula()``)
+                applied to every genome the evolver creates.
+        """
+        self.genome_profile = profile
+        self.genome_inputs = GFSLGenome.normalize_inputs(inputs)
+        self.genome_outputs = (
+            None
+            if outputs is None
+            else [(1, int(DataType(dtype)), int(idx)) for dtype, idx in outputs]
+        )
         self.population = []
         self.diversity_cache = set()
         attempts = 0
@@ -276,7 +335,9 @@ class GFSLEvolver:
 
         while len(self.population) < self.population_size and attempts < max_attempts:
             attempts += 1
-            genome = GFSLGenome(genome_type)
+            genome = GFSLGenome(genome_type, inputs=self.genome_inputs or None, profile=self.genome_profile)
+            if self.genome_outputs:
+                genome.outputs = list(self.genome_outputs)
             target_count = random.randint(1, max(1, int(initial_instructions)))
             for _ in range(target_count):
                 if not _append_random_instruction_fast(genome, max_attempts=6):
@@ -292,10 +353,7 @@ class GFSLEvolver:
             self.population.append(genome)
 
         while len(self.population) < self.population_size:
-            genome = _make_random_genome(
-                max(4, int(initial_instructions)),
-                genome_type=genome_type,
-            )
+            genome = self._random_genome(max(4, int(initial_instructions)), genome_type)
             self._enforce_complexity_budget(genome)
             _invalidate_genome_caches(genome)
             self.population.append(genome)
@@ -484,7 +542,14 @@ class GFSLEvolver:
 
     def crossover(self, parent1: GFSLGenome, parent2: GFSLGenome) -> GFSLGenome:
         """Crossover two genomes."""
-        child = GFSLGenome(parent1.genome_type)
+        inputs = dict(getattr(parent1, "input_counts", {}) or {})
+        for key, count in (getattr(parent2, "input_counts", {}) or {}).items():
+            inputs[key] = max(inputs.get(key, 0), count)
+        child = GFSLGenome(
+            parent1.genome_type,
+            inputs=inputs or None,
+            profile=getattr(parent1, "profile", None),
+        )
 
         if parent1.instructions and parent2.instructions:
             point1 = random.randint(0, len(parent1.instructions))
@@ -502,6 +567,19 @@ class GFSLEvolver:
         self._enforce_complexity_budget(child)
         return child
 
+    def invalidate_fitness(self) -> None:
+        """Forget every fitness value and the best-fitness trackers (e.g. the scoring changed).
+
+        The next generation re-evaluates the whole population, elite included, and stagnation
+        is measured afresh, so no comparison mixes scores from before and after the change.
+        """
+        for genome in self.population:
+            genome.fitness = None
+        self.best_fitness_tracker = -float("inf")
+        self.stagnation_count = 0
+        self.best_signature_tracker = ""
+        self.signature_stagnation_count = 0
+
     def evolve(
         self,
         generations: int,
@@ -509,32 +587,60 @@ class GFSLEvolver:
         progress_callback: Optional[Callable[[int, GFSLGenome, float], None]] = None,
         batch_evaluator: Optional[Callable[[List[GFSLGenome]], None]] = None,
         should_stop: Optional[Callable[..., object]] = None,
+        fitness_epoch: Optional[Callable[[], Hashable]] = None,
     ):
-        """Main evolution loop with adaptive mutation and diversity fallback."""
+        """Main evolution loop with adaptive mutation and diversity fallback.
+
+        Args:
+            fitness_epoch: optional callable returning the current scoring epoch (for example
+                the evaluation sample size). It is read at the start of every generation; when
+                its value changes, ``invalidate_fitness()`` runs, so the elite is re-scored and
+                selection never compares fitness values from different epochs. Each evaluated
+                genome stores the epoch in ``genome.fitness_epoch``.
+        """
         self._early_stop_generation = None
         self._early_stop_reason = None
         self._last_stall_immigrants = 0
 
+        def _score(genome: GFSLGenome) -> None:
+            try:
+                genome.fitness = evaluator(genome)
+            except Exception:
+                genome.fitness = -float("inf")
+            self.evaluations += 1
+
         for gen in range(generations):
             self.generation = gen
 
+            if fitness_epoch is not None:
+                epoch = fitness_epoch()
+                if epoch != self.fitness_epoch:
+                    if self.fitness_epoch is not None or self.fitness_epoch_changes:
+                        self.invalidate_fitness()
+                    else:
+                        # First epoch: drop scores that were taken outside any epoch.
+                        for genome in self.population:
+                            if getattr(genome, "fitness_epoch", None) != epoch:
+                                genome.fitness = None
+                    self.fitness_epoch = epoch
+                    self.fitness_epoch_changes.append((gen, epoch))
+
+            pending = [g for g in self.population if g.fitness is None]
             if batch_evaluator is not None:
                 try:
                     batch_evaluator(self.population)
+                    self.evaluations += len(pending)
                 except Exception:
                     for genome in self.population:
                         if genome.fitness is None:
-                            try:
-                                genome.fitness = evaluator(genome)
-                            except Exception:
-                                genome.fitness = -float("inf")
+                            _score(genome)
             else:
                 for genome in self.population:
                     if genome.fitness is None:
-                        try:
-                            genome.fitness = evaluator(genome)
-                        except Exception:
-                            genome.fitness = -float("inf")
+                        _score(genome)
+            if fitness_epoch is not None:
+                for genome in pending:
+                    genome.fitness_epoch = self.fitness_epoch  # type: ignore[attr-defined]
 
             self.population.sort(
                 key=lambda g: g.fitness or -float("inf"),
@@ -719,9 +825,9 @@ class GFSLEvolver:
                     and inject_attempts < (immigrant_target * 12)
                 ):
                     inject_attempts += 1
-                    immigrant = _make_random_genome(
+                    immigrant = self._random_genome(
                         immigrant_instruction_budget,
-                        genome_type=self.population[0].genome_type,
+                        self.population[0].genome_type,
                     )
                     immigrant.fitness = None
                     immigrant.generation = gen + 1
@@ -764,9 +870,9 @@ class GFSLEvolver:
                 if fallback_added:
                     continue
 
-                immigrant = _make_random_genome(
+                immigrant = self._random_genome(
                     fallback_instruction_budget,
-                    genome_type=self.population[0].genome_type,
+                    self.population[0].genome_type,
                 )
                 immigrant.fitness = None
                 immigrant.generation = gen + 1

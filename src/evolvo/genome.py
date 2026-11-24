@@ -6,14 +6,14 @@ import hashlib
 import heapq
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple, Union
 
 from .builder import GFSLExpressionBuilder
 from .custom_ops import resolve_operation_name
 from .enums import Category, ConfigProperty, DataType, Operation
 from .instruction import GFSLInstruction
 from .slots import DEFAULT_SLOT_COUNT
-from .validator import SlotValidator
+from .validator import InstructionProfile, SlotValidator
 from .values import ValueEnumerations
 from .weights import OperationWeights
 
@@ -37,13 +37,27 @@ class GFSLGenome:
         genome_type: str = "algorithm",
         slot_count: Optional[int] = None,
         auto_slot_count: bool = True,
+        inputs: Optional[Union[int, Mapping[Union[DataType, int], int]]] = None,
+        profile: Optional[InstructionProfile] = None,
     ):
+        """
+        Args:
+            inputs: declared input variables, as ``{DataType.DECIMAL: k}`` (or an ``int`` k for
+                ``k`` decimal inputs). Inputs ``d$0..d$k-1`` are readable from the first
+                instruction and survive ``rebuild_validator_state``, mutation and crossover.
+            profile: optional ``InstructionProfile`` restricting target categories and
+                operations offered by the validator (kept across rebuilds).
+        """
         self.genome_type = genome_type
         self.instructions: List[GFSLInstruction] = []
         self.auto_slot_count = auto_slot_count
         if slot_count is None:
             slot_count = DEFAULT_SLOT_COUNT
-        self.validator = SlotValidator(slot_count=slot_count)
+        self.input_counts: Dict[int, int] = {}
+        self.profile: Optional[InstructionProfile] = profile
+        self.validator = SlotValidator(slot_count=slot_count, profile=profile)
+        if inputs:
+            self.declare_inputs(inputs)
         self.outputs: List[Tuple[int, int, int]] = []
         self.fitness: Optional[float] = None
         self.generation: int = 0
@@ -52,6 +66,41 @@ class GFSLGenome:
         self.operation_weights = OperationWeights()
         self.instruction_activity: List[InstructionActivity] = []
         self.activity_tick: int = 0
+
+    @staticmethod
+    def normalize_inputs(
+        inputs: Optional[Union[int, Mapping[Union[DataType, int], int]]],
+    ) -> Dict[int, int]:
+        """``int`` k -> ``{DECIMAL: k}``; mapping keys -> ``int(DataType)``; zero counts dropped."""
+        if inputs is None:
+            return {}
+        if isinstance(inputs, int):
+            inputs = {DataType.DECIMAL: inputs}
+        out: Dict[int, int] = {}
+        for dtype, count in inputs.items():
+            if int(count) < 0:
+                raise ValueError(f"input count must be >= 0, got {count}")
+            if int(count) > 0:
+                out[int(DataType(dtype))] = int(count)
+        return out
+
+    def declare_inputs(self, inputs: Union[int, Mapping[Union[DataType, int], int]]) -> None:
+        """Declare (or widen) the input variables this genome may read without assigning them."""
+        if not hasattr(self, "input_counts"):
+            self.input_counts = {}
+        for key, count in self.normalize_inputs(inputs).items():
+            self.input_counts[key] = max(self.input_counts.get(key, 0), count)
+        self.validator.declare_inputs(self.input_counts)
+        self._signature = None
+        self._effective_instructions = None
+
+    def input_keys(self) -> List[str]:
+        """Executor input names of the declared inputs, e.g. ``['d$0', 'd$1']``."""
+        keys: List[str] = []
+        for dtype, count in sorted(getattr(self, "input_counts", {}).items()):
+            prefix = DataType(dtype).name[0].lower()
+            keys.extend(f"{prefix}${i}" for i in range(count))
+        return keys
 
     def expression(self) -> GFSLExpressionBuilder:
         """Create a slot-wise instruction builder bound to this genome."""
@@ -77,8 +126,12 @@ class GFSLGenome:
         if self.instructions:
             slot_count = max(slot_count, max(len(instr.slots) for instr in self.instructions))
 
-        new_validator = SlotValidator(slot_count=slot_count)
-        new_validator.active_types = active_types
+        new_validator = SlotValidator(
+            slot_count=slot_count,
+            input_counts=getattr(self, "input_counts", None) or None,
+            profile=getattr(self, "profile", None),
+        )
+        new_validator.active_types = active_types | new_validator.active_types
         for instr in self.instructions:
             if len(instr.slots) < slot_count:
                 instr.pad_to(slot_count)

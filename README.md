@@ -16,9 +16,14 @@ The project reimplements the **Genetic Fixed Structure Language (GFSL)** as desc
 - **Targeted operation extraction** to pull only the dependencies for specific result references.
 - **Neural architecture support** via `RecursiveModelBuilder`, enabling GFSL to describe CNN/MLP topologies (requires PyTorch).
 - **GFSL-NN architecture search** (`evolvo.nnarch`): a fixed 7-slot genetic language for torch models (vector and set tensors, attention, residuals, feature tokens). It has macros with integer arguments (`mlp`, `resmlp`, `transformer`, `deepsets`, user macros), cascading validity, and slot weights learned during search. Group types are discovered, not enumerated. Each candidate stops training automatically at its plateau, and a learned loss-versus-size frontier steers architecture size. Spec: [`papers/GFSL-NN.md`](papers/GFSL-NN.md).
+- **Declared inputs and outputs**: `GFSLGenome(inputs={DataType.DECIMAL: k})` / `initialize_population(..., inputs=k, outputs=[(DataType.DECIMAL, k)])` make `d$0..d$k-1` readable by every genome (initial, mutated, crossed over, immigrant).
+- **Instruction profiles**: `InstructionProfile.formula()` restricts the validator to straight-line arithmetic (variable targets, decimal ops, custom ops), so random search spends no effort on lists, functions or control flow.
+- **Batched execution**: `GFSLExecutor.execute_batch(genome, {"d$0": array, ...})` runs one genome over many rows with NumPy (about 1 000× faster than one `execute` per row at 10⁵ rows) with element-wise identical results; genomes using `CALL` or list ops fall back to the scalar path automatically.
+- **Evaluation epochs**: `evolve(..., fitness_epoch=callable)` re-scores the whole population (elite included) when the scoring changes, e.g. a growing evaluation sample, so fitness values from different epochs are never compared.
 - **Hybrid guidance**:
   - `GFSLQLearningGuide` learns slot choices with tabular Q-learning.
   - `GFSLSupervisedGuide` is a PyTorch model that predicts fitness and proposes smarter mutations (optional; skip if PyTorch is unavailable).
+  - `GFSLPolicyGuide` is a PyTorch policy-gradient (REINFORCE) agent that learns which edits and slot values pay off, rewards children relative to the population's top-k mean, anneals exploration as scores approach a target, and saves/loads its weights across runs.
 - **Real-time evaluation** (`RealTimeEvaluator`) with pluggable scoring aggregators and per-test callbacks.
 - **Operation weights (optional)** to attach usefulness or performance metadata to instructions or operation groups.
 - **Optional typed list support** with `d!0` / `d!#0` references and dedicated queue/stack ops (`PREPEND`, `APPEND`, `CLONE`, `FIFO`, `FILO`, `LISTCOUNT`, `LISTHASITEMS`).
@@ -114,10 +119,10 @@ from evolvo import (
 
 evolver = GFSLEvolver(population_size=30,
                       supervised_guide=GFSLSupervisedGuide())
-evolver.initialize_population("algorithm", initial_instructions=12)
-
-for genome in evolver.population:
-    genome.mark_output(DataType.DECIMAL, 1)
+# d$0 is the input x, d$1 the output: declare both so every genome (and every
+# later immigrant) can read x and writes y.
+evolver.initialize_population("algorithm", initial_instructions=12,
+                              inputs=1, outputs=[(DataType.DECIMAL, 1)])
 
 def fitness_fn(genome):
     return evaluator.evaluate(genome)
@@ -133,7 +138,7 @@ print(best.to_human_readable())
 
 - `src/evolvo/` - modular package code (enums, slot utilities, validator, genome, executor, evolver, guidance models). Public names load lazily, so `import evolvo` does not import NumPy until a NumPy-backed class is used.
 - `src/evolvo/nnarch/` - GFSL-NN: `language` (rows, ops, macros, cascading validity, repair, lowering), `stats` (contextual statistics with discovered groups), `policy` (learned slot weights), `efficiency` (size frontier), `stopping` (learned plateau stopping), `search` (evolution + knowledge), `build`/`train` (PyTorch).
-- `tests/` - `python -m unittest discover -s tests` (the PyTorch cases skip without torch).
+- `tests/` - `python -m unittest discover -s tests`: `test_gfsl_core.py` (inputs, profiles, batch/scalar parity, protected numerics, custom ops, fitness epochs, evolver smoke), `test_policy_guide.py`, `test_nnarch.py`. NumPy-dependent modules skip without NumPy; PyTorch cases skip without torch.
 - `example.py` and `examples/` - runnable scripts that bootstrap `src/` into `sys.path` for local runs.
 
 ---
@@ -182,7 +187,38 @@ Practical scripts live in `examples/`:
   - Supports accelerator auto-selection via `resolve_torch_accelerator(...)` with `auto|cpu|cuda|rocm|mps`.
   - Exposes `runtime_summary()` so you can verify the requested device, resolved backend, probe tensor device, and train/predict call counters.
 
-Both approaches respect GFSL’s fixed-slot constraints; the supervised guide simply tilts the mutation operator toward more promising instruction combinations.
+- `GFSLPolicyGuide` — a reinforcement-learning mutation policy (PyTorch):
+  - Chooses the edit (`slot`, `add`, `swap`, `remove`) and every slot value it has to pick, among the options the cascading validator offers (children stay valid), conditioned on `GFSLFeatureExtractor` features and the previous slot.
+  - Reward `(f_child − q) / |q|` with `q` the population's top-10% mean in the same generation; REINFORCE with a running baseline, an entropy bonus and AdamW.
+  - `q_target` (or `set_progress`) lowers the softmax temperature and entropy bonus as `q` improves; a uniform floor keeps every valid option possible.
+  - `save(path)` / `GFSLPolicyGuide.load(path, **overrides)` reuse learned weights in later runs.
+
+All guides respect GFSL’s fixed-slot constraints and plug in the same way: `GFSLEvolver(supervised_guide=guide)`; the evolver calls `observe_population(population)` once per generation and `propose_mutation(evolver, genome)` for each mutated child.
+
+### Formula Search at Scale
+
+```python
+import numpy as np
+from evolvo import DataType, GFSLEvolver, GFSLExecutor, GFSLPolicyGuide, InstructionProfile
+
+x = {"d$0": np.random.randn(100_000), "d$1": np.random.randn(100_000)}
+y = x["d$0"] * x["d$1"] + x["d$0"]
+executor = GFSLExecutor(compute_backend="cpu")
+size = {"n": 5_000}                                   # grows as the search improves
+
+def fitness(genome):
+    n = size["n"]
+    pred = executor.execute_batch(genome, {k: v[:n] for k, v in x.items()}, track_activity=False)["d$2"]
+    mse = float(np.mean((pred - y[:n]) ** 2))
+    return -mse if np.isfinite(mse) else -1e9
+
+evolver = GFSLEvolver(population_size=200, supervised_guide=GFSLPolicyGuide(q_target=0.0))
+evolver.initialize_population("algorithm", 8, inputs=2, outputs=[(DataType.DECIMAL, 2)],
+                              profile=InstructionProfile.formula())
+evolver.evolve(100, fitness, fitness_epoch=lambda: size["n"])   # re-scores everyone when n changes
+```
+
+`execute_batch` returns one float64 array per decimal output (NaN for a void result) and one bool array per boolean output. A custom operation can supply `batch_function=` (array in, array out) next to its scalar `function`; without it the batch path calls the scalar function row by row.
 
 ### Experimental Kompute Execution
 
@@ -241,6 +277,8 @@ search.knowledge.save("k.json")                                    # tendencies 
 - **Learned weights**: `AdaptivePolicy` samples each slot (and the mutation operator) by the reward its choices earned, per context. `ContextualStats` decides which context features define groups, using adjusted variance gain and hierarchical shrinkage.
 - **Efficiency**: score = `ln(loss) + c·ln(params)`. `EfficiencyModel` fits the loss/size frontier and pushes sizes toward where another doubling stops paying. The width window widens only where elite genomes press against it.
 - **Stopping**: `PlateauStopper` stops each candidate when learning stops paying (learned patience, equal-effort hopeless check). The search stops when its best score converges.
+
+- **Classification**: `TorchTask.classification((x_tr, y_tr), (x_val, y_val))` trains with cross-entropy on the head's logits (targets become class indices) and reports validation `accuracy`; build the space with `ArchSpace(inputs, n_classes, task={"loss": "ce"})` so learned stopping statistics stay separate from regression tasks.
 
 See [`papers/GFSL-NN.md`](papers/GFSL-NN.md) for the full specification.
 
@@ -455,10 +493,10 @@ evaluator = RealTimeEvaluator(
     executor_kwargs={"compute_backend": "auto"},
 )
 evolver = GFSLEvolver(population_size=30)
-evolver.initialize_population("algorithm", initial_instructions=15)
-
-for genome in evolver.population:
-    genome.mark_output(DataType.DECIMAL, 1)
+# d$0 is the input x, d$1 the output: declare both so every genome (and every
+# later immigrant) can read x and writes y.
+evolver.initialize_population("algorithm", initial_instructions=15,
+                              inputs=1, outputs=[(DataType.DECIMAL, 1)])
 
 evolver.evolve(100, evaluator.evaluate)
 best = evolver.population[0]
@@ -556,10 +594,10 @@ from evolvo import (
 guide = GFSLSupervisedGuide(hidden_layers=[256, 128],
                             candidate_pool=4, min_buffer=64)
 evolver = GFSLEvolver(population_size=32, supervised_guide=guide)
-evolver.initialize_population("algorithm", initial_instructions=12)
-
-for genome in evolver.population:
-    genome.mark_output(DataType.DECIMAL, 1)
+# d$0 is the input x, d$1 the output: declare both so every genome (and every
+# later immigrant) can read x and writes y.
+evolver.initialize_population("algorithm", initial_instructions=12,
+                              inputs=1, outputs=[(DataType.DECIMAL, 1)])
 
 evolver.evolve(60, evaluator.evaluate)
 best = evolver.population[0]
@@ -614,7 +652,8 @@ The planner is designed for external integrations (such as `pcpl_evolvo`) where 
 
 - **Operations / Data types** — extend `Operation` and `DataType` enums; the slot validator automatically respects new options.
 - **Enumerations** — add or override entries in `ValueEnumerations` to open new discrete value sets (learning rates, optimizer choices, etc.).
-- **Guidance** — swap in your own mutation proposal system by implementing a `propose_mutation` method similar to `GFSLSupervisedGuide`.
+- **Guidance** — swap in your own mutation proposal system by implementing `propose_mutation(evolver, genome)` and `observe_population(population)` like `GFSLSupervisedGuide` and `GFSLPolicyGuide`.
+- **Language** — pass an `InstructionProfile` (allowed target categories and operations) to `GFSLGenome` or `initialize_population` to restrict what the validator offers.
 - **Scoring** — pass a custom `score_aggregator` into `RealTimeEvaluator` to change how per-case fitness values are combined.
 
 Because every slot is enumerated and validated, extending the system never introduces invalid states—new concepts simply become additional discrete options inside the GFSL language.
@@ -638,7 +677,8 @@ They remain useful for validating the baseline evolver and seeing the raw GFSL o
 
 - Gradient-informed mutation proposals (hybrid neuro-evolution).
 - Masked (padded) set inputs and macro mining from recurring elite fragments in GFSL-NN.
-- Benchmarks comparing supervised guidance vs. unguided baselines.
+- Benchmarks comparing supervised and policy-gradient guidance vs. unguided baselines.
+- Native Kompute dispatch for `execute_batch` (the batch path is NumPy on CPU).
 - Operation conversion tables and device-targeted weight profiles.
 - ONNX export for GFSL-NN modules (TorchScript tracing already works).
 
