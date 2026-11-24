@@ -108,6 +108,15 @@ Quick guidance for AI assistants working in this repository.
   keyed by `genome._policy_token`; `observe_population` rewards only children created since the
   previous observation and then clears pending traces (copies of old children never double
   count). Option scores use hashed `(slot, previous slot value, option)` buckets.
+- `GFSLQLearningGuide` also implements the evolver plug-in (`propose_mutation` builds one instruction
+  with the Q-table and replaces/appends it; `observe_population` updates Q from relative rewards).
+  The evolver path uses plain cascading options (`use_viability=False`); probability-tree
+  viability made it ~80x slower.
+- Pitfall (fixed): `_build_dependency_graph` registered an instruction as its target's producer
+  before resolving its sources, so in-place updates (`d$2 = LOG(d$2)`) depended on themselves and
+  the earlier writers of `d$2` dropped out of `extract_effective_algorithm` (and out of
+  execution). Sources are now resolved first; `test_in_place_update_keeps_its_history` guards it.
+  Effective sets and signatures of such genomes changed with the fix.
 - Pitfall (fixed): never alias the module-level op groups (`DECIMAL_OPS`, `TENSOR_OPS`, ...) in
   the validator; `valid_ops = DECIMAL_OPS` followed by `.extend(...)` grew the global list on
   every call, leaked list ops/CALL into every later decimal choice and made option generation
@@ -159,7 +168,7 @@ Quick guidance for AI assistants working in this repository.
 - Determinism: one `random.Random(seed)` per search; candidate *i* uses torch seed `seed*1_000_003+i`.
 
 ## Suggested verification
-- `PYTHONPATH=src python -m unittest discover -s tests` — 33 tests with NumPy + torch:
+- `PYTHONPATH=src python -m unittest discover -s tests` — 35 tests with NumPy + torch:
   `test_gfsl_core.py` (inputs, profiles, batch/scalar parity on random genomes and special
   values, custom ops, fitness epochs, evolver smoke), `test_policy_guide.py` (reward, schedule,
   bandit learning, save/load, evolver plug-in), `test_nnarch.py` (GFSL-NN incl. classification).

@@ -435,14 +435,9 @@ class GFSLGenome:
         for idx, instr in enumerate(self.instructions):
             inside_function_body = idx in function_body_indices and idx not in function_start_indices
 
-            if not inside_function_body and instr.target_cat != Category.NONE:
-                target_key = (
-                    int(instr.target_cat),
-                    int(instr.target_type),
-                    int(instr.target_index),
-                )
-                producers[target_key] = idx
-
+            # Sources are resolved against the producers *before* this instruction, so an
+            # in-place update such as ``d$2 = LOG(d$2)`` depends on the previous writer of d$2
+            # (registering the target first made it depend on itself and dropped the history).
             if not inside_function_body:
                 if instr.source1_cat in (
                     Category.VARIABLE,
@@ -473,6 +468,14 @@ class GFSLGenome:
                     )
                     if source_key in producers:
                         dependencies[idx].add(producers[source_key])
+
+            if not inside_function_body and instr.target_cat != Category.NONE:
+                target_key = (
+                    int(instr.target_cat),
+                    int(instr.target_type),
+                    int(instr.target_index),
+                )
+                producers[target_key] = idx
 
             if (
                 not inside_function_body

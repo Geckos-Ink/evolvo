@@ -78,6 +78,17 @@ class InputDeclarationTests(unittest.TestCase):
         out = GFSLExecutor(compute_backend="cpu").execute(g, {"d$0": 1.5, "d$1": 2.0})
         self.assertEqual(out["d$2"], 3.5)
 
+    def test_in_place_update_keeps_its_history(self):
+        g = GFSLGenome("algorithm", inputs=2)
+        self.assertTrue(g.add_instruction(_instr(2, Operation.MUL, ("v", 0), ("v", 1))))
+        self.assertTrue(g.add_instruction(_instr(2, Operation.ADD, ("v", 2), ("v", 0))))
+        g.mark_output(DataType.DECIMAL, 2)
+        self.assertEqual(g.extract_effective_algorithm(), [0, 1])
+        ex = GFSLExecutor(compute_backend="cpu")
+        self.assertEqual(ex.execute(g, {"d$0": 3.0, "d$1": 4.0})["d$2"], 15.0)
+        out = ex.execute_batch(g, {"d$0": np.array([3.0, 1.0]), "d$1": 4.0}, mode="vector")
+        np.testing.assert_array_equal(out["d$2"], [15.0, 5.0])
+
     def test_without_declaration_inputs_are_not_offered(self):
         g = GFSLGenome("algorithm")
         self.assertFalse(g.add_instruction(_instr(0, Operation.ADD, ("v", 0), ("v", 1))))
@@ -220,6 +231,33 @@ class BatchExecutionTests(unittest.TestCase):
             self.assertEqual(self.ex.last_batch_mode, "vector")
             np.testing.assert_allclose(out["d$2"], expected, rtol=1e-14)
             _assert_same(self, out, self.ex.execute_batch(g, x, mode="scalar", track_activity=False), g)
+
+
+class QLearningGuideTests(unittest.TestCase):
+    def test_plugs_into_evolver_and_learns(self):
+        from evolvo import GFSLQLearningGuide
+
+        warnings.simplefilter("ignore", RuntimeWarning)
+        random.seed(4)
+        rng = np.random.default_rng(4)
+        x0 = rng.uniform(-2, 2, 200)
+        y = 3 * x0
+        ex = GFSLExecutor(compute_backend="cpu")
+        guide = GFSLQLearningGuide()
+        ev = GFSLEvolver(population_size=30, supervised_guide=guide)
+        ev.initialize_population("algorithm", 5, inputs=1, outputs=[(DataType.DECIMAL, 1)], profile=InstructionProfile.formula(allow_custom=False))
+
+        def fitness(g):
+            pred = ex.execute_batch(g, {"d$0": x0}, track_activity=False)["d$1"]
+            mse = float(np.mean((pred - y) ** 2))
+            return 1.0 / (1.0 + mse) if np.isfinite(mse) else 0.0
+
+        ev.evolve(6, fitness)
+        self.assertGreater(guide.observations, 0)
+        self.assertGreater(guide.updates, 0)
+        self.assertGreater(len(guide.q_table), 0)
+        for g in ev.population:
+            self.assertEqual(g.input_counts, {int(DataType.DECIMAL): 1})
 
 
 class FitnessEpochTests(unittest.TestCase):

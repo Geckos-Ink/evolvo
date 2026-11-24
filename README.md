@@ -179,7 +179,7 @@ Practical scripts live in `examples/`:
 
 ### Guidance Strategies
 
-- `GFSLQLearningGuide` — a tabular, slot-wise Q-learning agent that chooses valid slot values.
+- `GFSLQLearningGuide` — a tabular, slot-wise Q-learning agent that chooses valid slot values. As an evolver guide it builds one instruction per child (replacing a random instruction or appending) and learns from the same relative reward as `GFSLPolicyGuide`; `use_viability=True` restores the slower dead-end-free construction.
 - `GFSLSupervisedGuide` — a learnable meta-model:
   - Extracts structural features from genomes (`GFSLFeatureExtractor`).
   - Learns a regression model (`GFSLSupervisedDirectionModel`) that predicts future fitness.

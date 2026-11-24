@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import copy
+import itertools
+import math
 import random
 from collections import defaultdict, deque
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .instruction import GFSLInstruction
 from .slots import DEFAULT_SLOT_COUNT
@@ -17,13 +20,29 @@ class GFSLQLearningGuide:
     Learns which slot values work best given previous slots.
     """
 
-    def __init__(self, learning_rate: float = 0.1, epsilon: float = 0.1):
+    def __init__(
+        self,
+        learning_rate: float = 0.1,
+        epsilon: float = 0.1,
+        *,
+        replace_probability: float = 0.5,
+        top_fraction: float = 0.10,
+        reward_clip: float = 5.0,
+        use_viability: bool = False,
+    ):
         self.learning_rate = learning_rate
         self.epsilon = epsilon
         self.discount_factor = 0.95
+        self.replace_probability = float(replace_probability)
+        self.top_fraction = float(top_fraction)
+        self.reward_clip = float(reward_clip)
+        self.use_viability = bool(use_viability)  # evolver path: fast cascading options
 
         self.q_table = defaultdict(lambda: defaultdict(float))
         self.experience_buffer = deque(maxlen=1000)
+        self._pending: Dict[int, List[Tuple[str, int]]] = {}
+        self.observations = 0
+        self.updates = 0
 
     def get_state_key(self, instruction: GFSLInstruction, slot_index: int) -> str:
         """Generate state key from previous slots."""
@@ -50,9 +69,14 @@ class GFSLQLearningGuide:
         return random.choice(best_actions)
 
     def build_instruction(
-        self, validator: SlotValidator, max_attempts: int = 25
+        self, validator: SlotValidator, max_attempts: int = 25, *, use_viability: bool = True
     ) -> Tuple[GFSLInstruction, List[Tuple[str, int]]]:
-        """Build instruction using Q-learning guidance."""
+        """Build instruction using Q-learning guidance.
+
+        ``use_viability`` restricts each slot to options that can still complete the instruction
+        (``SlotValidator.viable_options``, which builds probability trees and is slow); with
+        ``False`` the plain cascading options are used and a dead end simply retries.
+        """
         if validator.slot_count == 0:
             validator.slot_count = DEFAULT_SLOT_COUNT
         last_error: Optional[Exception] = None
@@ -65,8 +89,11 @@ class GFSLQLearningGuide:
                     if not valid_options:
                         raise ValueError(f"No valid options for slot {slot_idx}.")
 
-                    viable, _ = validator.viable_options(instruction, slot_idx)
-                    action_space = viable or valid_options
+                    if use_viability:
+                        viable, _ = validator.viable_options(instruction, slot_idx)
+                        action_space = viable or valid_options
+                    else:
+                        action_space = valid_options
 
                     state_key = self.get_state_key(instruction, slot_idx)
                     action = self.choose_action(instruction, slot_idx, action_space)
@@ -101,6 +128,72 @@ class GFSLQLearningGuide:
                 )
 
             self.q_table[state_key][action] = new_q
+
+    # ------------------------------------------------------------------ evolver interface
+    # Same plug-in protocol as GFSLSupervisedGuide / GFSLPolicyGuide:
+    # GFSLEvolver(supervised_guide=GFSLQLearningGuide()).
+
+    def propose_mutation(self, evolver, genome):
+        """Child = parent with one Q-learning-built instruction replacing a random instruction
+        (probability ``replace_probability``) or appended."""
+        from .evolver import _invalidate_genome_caches
+
+        child = copy.deepcopy(genome)
+        child.rebuild_validator_state()
+        try:
+            instruction, states_actions = self.build_instruction(
+                child.validator, use_viability=self.use_viability
+            )
+        except RuntimeError:
+            return evolver.mutate(genome)
+        if child.instructions and (
+            random.random() < self.replace_probability
+            or len(child.instructions) >= int(getattr(evolver, "max_instruction_count", 128))
+        ):
+            idx = random.randrange(len(child.instructions))
+            child.instructions[idx] = instruction
+        else:
+            child.instructions.append(instruction)
+        child.rebuild_validator_state()
+        evolver._enforce_complexity_budget(child)
+        _invalidate_genome_caches(child)
+        child.fitness = None
+        child.generation = genome.generation
+        token = next(_TOKENS)
+        child._qlearning_token = token  # type: ignore[attr-defined]
+        self._pending[token] = states_actions
+        return child
+
+    def observe_population(self, population: Sequence) -> None:
+        """Update Q-values from the children evaluated since the last call.
+
+        Reward = ``(f - q) / (|q| + 1e-8)`` clipped to ``±reward_clip``, with ``q`` the mean
+        fitness of the population's top ``top_fraction`` (same generation, same scoring).
+        """
+        finite = sorted(
+            (float(g.fitness) for g in population if g.fitness is not None and math.isfinite(float(g.fitness))),
+            reverse=True,
+        )
+        if finite:
+            k = max(1, int(math.ceil(self.top_fraction * len(finite))))
+            q = sum(finite[:k]) / k
+            for genome in population:
+                token = getattr(genome, "_qlearning_token", None)
+                states_actions = self._pending.pop(token, None) if token is not None else None
+                if states_actions is None or genome.fitness is None:
+                    continue
+                f = float(genome.fitness)
+                if math.isfinite(f):
+                    reward = max(-self.reward_clip, min(self.reward_clip, (f - q) / (abs(q) + 1e-8)))
+                else:
+                    reward = -self.reward_clip
+                self.update_from_fitness(states_actions, reward)
+                self.updates += 1
+        self._pending.clear()
+        self.observations += 1
+
+
+_TOKENS = itertools.count(1)
 
 
 __all__ = ["GFSLQLearningGuide"]
